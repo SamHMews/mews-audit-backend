@@ -1075,14 +1075,16 @@ def build_pdf(report: AuditReport) -> bytes:
         ]))
         return t
 
-    def zebra_table(table_obj):
-        # Alternate row shading (excluding header)
-        ts = TableStyle([])
-        for i in range(1, 50000):  # safe upper bound
-            if i % 2 == 0:
-                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#f8fafc"))
-        table_obj.setStyle(ts)
-        return table_obj
+   def zebra_table(table_obj, row_count: int):
+    # Alternate row shading (excluding header). Only apply to rows that exist.
+    ts = TableStyle([])
+    # row 0 is header; data rows are 1..row_count-1
+    for i in range(1, row_count):
+        if i % 2 == 0:
+            ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#f8fafc"))
+    table_obj.setStyle(ts)
+    return table_obj
+
 
     def header_footer(canvas, doc_):
         canvas.saveState()
@@ -1184,7 +1186,8 @@ def build_pdf(report: AuditReport) -> bytes:
 
                 header = ["Accounting category", "Product", "Code", "Active", "Type"]
                 colw = [52*mm, 72*mm, 18*mm, 14*mm, 24*mm]
-                tbl = zebra_table(make_long_table(header, rows, colw))
+                tbl = zebra_table(make_long_table(header, rows, colw), row_count=len(rows) + 1)
+
                 block.append(Paragraph("<b>Detail: Accounting category mappings</b>", styles["SmallX"]))
                 block.append(Spacer(1, 3))
                 block.append(tbl)
@@ -1210,7 +1213,8 @@ def build_pdf(report: AuditReport) -> bytes:
 
                 header = ["PaymentId", "Type", "State", "Curr", "Net", "Gross", "CreatedUtc"]
                 colw = [40*mm, 22*mm, 16*mm, 10*mm, 16*mm, 16*mm, 40*mm]
-                tbl = zebra_table(make_long_table(header, rows, colw))
+                tbl = zebra_table(make_long_table(header, rows, colw), row_count=len(rows) + 1)
+
                 block.append(Paragraph("<b>Detail: Payments sample</b>", styles["SmallX"]))
                 block.append(Spacer(1, 3))
                 block.append(tbl)
@@ -1241,7 +1245,8 @@ def build_pdf(report: AuditReport) -> bytes:
 
                 header = ["Space category", "Cat type", "Space", "Active", "State"]
                 colw = [52*mm, 18*mm, 74*mm, 14*mm, 22*mm]
-                tbl = zebra_table(make_long_table(header, rows, colw))
+                tbl = zebra_table(make_long_table(header, rows, colw), row_count=len(rows) + 1)
+
                 block.append(Paragraph("<b>Detail: Space categories and spaces</b>", styles["SmallX"]))
                 block.append(Spacer(1, 3))
                 block.append(tbl)
@@ -1300,7 +1305,8 @@ def build_pdf(report: AuditReport) -> bytes:
 
                 header = ["Rate group", "Relation", "Rate name", "RateId", "BaseRateId", "Flags"]
                 colw = [46*mm, 22*mm, 46*mm, 34*mm, 34*mm, 26*mm]
-                tbl = zebra_table(make_long_table(header, rows, colw))
+                tbl = zebra_table(make_long_table(header, rows, colw), row_count=len(rows) + 1)
+
                 block.append(Paragraph("<b>Detail: Rates (grouped by Rate Group and Base Rate)</b>", styles["SmallX"]))
                 block.append(Spacer(1, 3))
                 block.append(tbl)
@@ -1323,7 +1329,8 @@ def build_pdf(report: AuditReport) -> bytes:
                         ])
                 header = ["RateGroupId", "Policy name", "Type", "PolicyId", "Description"]
                 colw = [28*mm, 44*mm, 18*mm, 30*mm, 66*mm]
-                tbl = zebra_table(make_long_table(header, rows, colw))
+               tbl = zebra_table(make_long_table(header, rows, colw), row_count=len(rows) + 1)
+
                 block.append(Paragraph("<b>Detail: Cancellation policies by rate group</b>", styles["SmallX"]))
                 block.append(Spacer(1, 3))
                 block.append(tbl)
@@ -1340,7 +1347,8 @@ def build_pdf(report: AuditReport) -> bytes:
                     rows.append([P(line, "TinyX")])
                 header = ["Restriction (descriptive)"]
                 colw = [A4[0] - (32*mm)]
-                tbl = zebra_table(make_long_table(header, rows, colw))
+              tbl = zebra_table(make_long_table(header, rows, colw), row_count=len(rows) + 1)
+
                 block.append(Paragraph("<b>Detail: Restrictions (descriptive)</b>", styles["SmallX"]))
                 block.append(Spacer(1, 3))
                 block.append(tbl)
