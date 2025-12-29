@@ -16,8 +16,10 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib import colors
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether
+    SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether,
+    Table, LongTable, TableStyle
 )
+
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_RIGHT, TA_CENTER
 from reportlab.graphics import renderPDF
@@ -1046,6 +1048,331 @@ def build_pdf(report: AuditReport) -> bytes:
         author="Mews Audit Web App",
     )
 
+    # ---------- Table helpers ----------
+    def P(text, style_name="TinyX"):
+        return Paragraph(esc(text), styles[style_name])
+
+    def make_long_table(header: List[str], rows: List[List[Any]], col_widths: List[float]):
+        """
+        header: list of column names (strings)
+        rows: list of row lists; each cell may be str or a Paragraph
+        col_widths: in points (use mm conversion)
+        """
+        data = [[P(h, "SmallX") for h in header]] + rows
+
+        t = LongTable(data, colWidths=col_widths, repeatRows=1)
+        t.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2ff")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
+            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cbd5e1")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        return t
+
+    def zebra_table(table_obj):
+        # Alternate row shading (excluding header)
+        ts = TableStyle([])
+        for i in range(1, 50000):  # safe upper bound
+            if i % 2 == 0:
+                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#f8fafc"))
+        table_obj.setStyle(ts)
+        return table_obj
+
+    def header_footer(canvas, doc_):
+        canvas.saveState()
+        y = A4[1] - 12 * mm
+
+        if logo:
+            renderPDF.draw(logo, canvas, 16 * mm, y - (logo.height or 0))
+            canvas.setFont("Helvetica-Bold", 12.5)
+            canvas.drawString(16 * mm + 44 * mm, y - 3 * mm, "Mews Configuration Audit Report")
+        else:
+            canvas.setFont("Helvetica-Bold", 12.5)
+            canvas.drawString(16 * mm, y - 3 * mm, "Mews Configuration Audit Report")
+
+        canvas.setFont("Helvetica", 8.5)
+        canvas.drawRightString(A4[0] - 16 * mm, y - 3 * mm, f"Page {doc_.page}")
+        canvas.restoreState()
+
+    # ---------- Build story ----------
+    story: List[Any] = []
+    story.append(Spacer(1, 16))
+
+    # Cover
+    story.append(Paragraph("Mews Configuration Audit Report", styles["TitleX"]))
+    story.append(Paragraph(
+        f"<b>Enterprise:</b> {esc(report.enterprise_name or 'Unknown')} &nbsp;&nbsp; "
+        f"<b>EnterpriseId:</b> {esc(report.enterprise_id or 'Unknown')}<br/>"
+        f"<b>Generated (UTC):</b> {esc(report.generated_utc.strftime('%d/%m/%Y %H:%M'))} &nbsp;&nbsp; "
+        f"<b>Base URL:</b> {esc(report.base_url)} &nbsp;&nbsp; "
+        f"<b>Client:</b> {esc(report.client_name)}",
+        styles["BodyX"]
+    ))
+    story.append(Spacer(1, 10))
+
+    # Summary counts
+    total = 0
+    counts = {"PASS": 0, "WARN": 0, "FAIL": 0, "NEEDS_INPUT": 0, "NA": 0}
+    for _, items in report.sections:
+        for it in items:
+            total += 1
+            k = (it.status or "").upper()
+            counts[k] = counts.get(k, 0) + 1
+
+    story.append(Paragraph("Executive summary", styles["H1X"]))
+    story.append(Paragraph(
+        f"Total checks: <b>{total}</b> &nbsp;&nbsp; "
+        f"PASS: <b>{counts['PASS']}</b> &nbsp;&nbsp; "
+        f"WARN: <b>{counts['WARN']}</b> &nbsp;&nbsp; "
+        f"FAIL: <b>{counts['FAIL']}</b> &nbsp;&nbsp; "
+        f"NEEDS_INPUT: <b>{counts['NEEDS_INPUT']}</b> &nbsp;&nbsp; "
+        f"NA: <b>{counts['NA']}</b>",
+        styles["BodyX"]
+    ))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(
+        "This report is generated from the Mews Connector API. Items marked <b>NEEDS_INPUT</b> require manual confirmation where the API does not expose the relevant configuration.",
+        styles["SmallX"]
+    ))
+    story.append(PageBreak())
+
+    # ---------- Detailed sections ----------
+    for sec_name, items in report.sections:
+        story.append(Paragraph(esc(sec_name), styles["H1X"]))
+        story.append(Spacer(1, 6))
+
+        for it in items:
+            block: List[Any] = []
+            block.append(Paragraph(
+                f"<b>{esc(it.key)}</b> &nbsp;&nbsp; {badge(it.status)} &nbsp;&nbsp; "
+                f"<font color='#64748b'>Risk:</font> <b>{esc(it.risk)}</b>",
+                styles["BodyX"]
+            ))
+            block.append(Paragraph(esc(it.summary or "-"), styles["BodyX"]))
+            block.append(Spacer(1, 4))
+
+            details = it.details or {}
+
+            # -------------------------
+            # Accounting categories → products (TABLE)
+            # -------------------------
+            if "AccountingCategoryBreakdown" in details:
+                cats = details["AccountingCategoryBreakdown"] or []
+                # Flatten rows for quick scan: Category, Product, Code, Active, Type
+                rows = []
+                for cat in cats:
+                    cname = cat.get("AccountingCategoryName") or ""
+                    cid = cat.get("AccountingCategoryId") or ""
+                    prods = cat.get("Products") or []
+                    if not prods:
+                        rows.append([P(f"{cname} ({cid})", "TinyX"), P("—", "TinyX"), P("—"), P("—"), P("—")])
+                        continue
+                    for p in prods:
+                        rows.append([
+                            P(f"{cname} ({cid})", "TinyX"),
+                            P(p.get("Name") or "", "TinyX"),
+                            P(p.get("Code") or "", "TinyX"),
+                            P(yn(p.get("IsActive")), "TinyX"),
+                            P(p.get("Type") or "", "TinyX"),
+                        ])
+
+                header = ["Accounting category", "Product", "Code", "Active", "Type"]
+                colw = [52*mm, 72*mm, 18*mm, 14*mm, 24*mm]
+                tbl = zebra_table(make_long_table(header, rows, colw))
+                block.append(Paragraph("<b>Detail: Accounting category mappings</b>", styles["SmallX"]))
+                block.append(Spacer(1, 3))
+                block.append(tbl)
+                block.append(Spacer(1, 6))
+
+            # -------------------------
+            # Payments sample (TABLE)
+            # -------------------------
+            if "Payments" in details:
+                pays = details.get("Payments") or []
+                rows = []
+                for p in pays:
+                    amt = p.get("Amount") or {}
+                    rows.append([
+                        P(p.get("Id") or "", "TinyX"),
+                        P(p.get("Type") or "", "TinyX"),
+                        P(p.get("State") or "", "TinyX"),
+                        P(amt.get("Currency") or p.get("Currency") or "", "TinyX"),
+                        P(str(amt.get("NetValue") or ""), "TinyX"),
+                        P(str(amt.get("GrossValue") or ""), "TinyX"),
+                        P(p.get("CreatedUtc") or "", "TinyX"),
+                    ])
+
+                header = ["PaymentId", "Type", "State", "Curr", "Net", "Gross", "CreatedUtc"]
+                colw = [40*mm, 22*mm, 16*mm, 10*mm, 16*mm, 16*mm, 40*mm]
+                tbl = zebra_table(make_long_table(header, rows, colw))
+                block.append(Paragraph("<b>Detail: Payments sample</b>", styles["SmallX"]))
+                block.append(Spacer(1, 3))
+                block.append(tbl)
+                block.append(Spacer(1, 6))
+
+            # -------------------------
+            # Spaces by category (TABLE)
+            # -------------------------
+            if "SpacesByCategory" in details:
+                cats = details["SpacesByCategory"] or []
+                rows = []
+                for cat in cats:
+                    cname = cat.get("ResourceCategoryName") or ""
+                    cid = cat.get("ResourceCategoryId") or ""
+                    ctype = cat.get("Type") or ""
+                    res = cat.get("Resources") or []
+                    if not res:
+                        rows.append([P(f"{cname} ({cid})", "TinyX"), P(ctype, "TinyX"), P("—", "TinyX"), P("—", "TinyX"), P("—", "TinyX")])
+                        continue
+                    for r in res:
+                        rows.append([
+                            P(f"{cname} ({cid})", "TinyX"),
+                            P(ctype, "TinyX"),
+                            P(r.get("Name") or "", "TinyX"),
+                            P(yn(r.get("IsActive")), "TinyX"),
+                            P(r.get("State") or "", "TinyX"),
+                        ])
+
+                header = ["Space category", "Cat type", "Space", "Active", "State"]
+                colw = [52*mm, 18*mm, 74*mm, 14*mm, 22*mm]
+                tbl = zebra_table(make_long_table(header, rows, colw))
+                block.append(Paragraph("<b>Detail: Space categories and spaces</b>", styles["SmallX"]))
+                block.append(Spacer(1, 3))
+                block.append(tbl)
+                block.append(Spacer(1, 6))
+
+            # -------------------------
+            # Rates grouped by Rate Group and Base Rate (TABLE)
+            # -------------------------
+            if "RateIndex" in details:
+                rgroups = details["RateIndex"].get("RateGroups") or []
+                rows = []
+
+                for g in rgroups:
+                    gname = g.get("RateGroupName") or ""
+                    gid = g.get("RateGroupId") or ""
+                    # Tree: Base + Derived
+                    for node in (g.get("Tree") or []):
+                        base = node.get("Base") or {}
+                        rows.append([
+                            P(f"{gname} ({gid})", "TinyX"),
+                            P("Base", "TinyX"),
+                            P(base.get("Name") or "", "TinyX"),
+                            P(base.get("Id") or "", "TinyX"),
+                            P("—", "TinyX"),
+                            P(_rate_flags(base), "TinyX"),
+                        ])
+                        for d in (node.get("Derived") or []):
+                            rows.append([
+                                P(f"{gname} ({gid})", "TinyX"),
+                                P("Derived", "TinyX"),
+                                P(d.get("Name") or "", "TinyX"),
+                                P(d.get("Id") or "", "TinyX"),
+                                P(d.get("BaseRateId") or "", "TinyX"),
+                                P(_rate_flags(d), "TinyX"),
+                            ])
+
+                    # Orphans + Misc
+                    for o in (g.get("Orphans") or []):
+                        rows.append([
+                            P(f"{gname} ({gid})", "TinyX"),
+                            P("Derived (orphan)", "TinyX"),
+                            P(o.get("Name") or "", "TinyX"),
+                            P(o.get("Id") or "", "TinyX"),
+                            P(o.get("BaseRateId") or "", "TinyX"),
+                            P(_rate_flags(o), "TinyX"),
+                        ])
+                    for m in (g.get("Misc") or []):
+                        rows.append([
+                            P(f"{gname} ({gid})", "TinyX"),
+                            P("Other", "TinyX"),
+                            P(m.get("Name") or "", "TinyX"),
+                            P(m.get("Id") or "", "TinyX"),
+                            P(m.get("BaseRateId") or "", "TinyX"),
+                            P(_rate_flags(m), "TinyX"),
+                        ])
+
+                header = ["Rate group", "Relation", "Rate name", "RateId", "BaseRateId", "Flags"]
+                colw = [46*mm, 22*mm, 46*mm, 34*mm, 34*mm, 26*mm]
+                tbl = zebra_table(make_long_table(header, rows, colw))
+                block.append(Paragraph("<b>Detail: Rates (grouped by Rate Group and Base Rate)</b>", styles["SmallX"]))
+                block.append(Spacer(1, 3))
+                block.append(tbl)
+                block.append(Spacer(1, 6))
+
+            # -------------------------
+            # Cancellation policies mapped to rate groups (TABLE)
+            # -------------------------
+            if "CancellationPoliciesByRateGroup" in details:
+                cp_map = details.get("CancellationPoliciesByRateGroup") or {}
+                rows = []
+                for gid, plist in cp_map.items():
+                    for p in plist:
+                        rows.append([
+                            P(gid, "TinyX"),
+                            P(p.get("Name") or "", "TinyX"),
+                            P(p.get("Type") or "", "TinyX"),
+                            P(p.get("Id") or "", "TinyX"),
+                            P(p.get("Description") or "", "TinyX"),
+                        ])
+                header = ["RateGroupId", "Policy name", "Type", "PolicyId", "Description"]
+                colw = [28*mm, 44*mm, 18*mm, 30*mm, 66*mm]
+                tbl = zebra_table(make_long_table(header, rows, colw))
+                block.append(Paragraph("<b>Detail: Cancellation policies by rate group</b>", styles["SmallX"]))
+                block.append(Spacer(1, 3))
+                block.append(tbl)
+                block.append(Spacer(1, 6))
+
+            # -------------------------
+            # Restrictions (TABLE)
+            # -------------------------
+            if "RestrictionLines" in details:
+                lines = details.get("RestrictionLines") or []
+                rows = []
+                for line in lines:
+                    # Keep a single wrapped column + optionally split if you want later
+                    rows.append([P(line, "TinyX")])
+                header = ["Restriction (descriptive)"]
+                colw = [A4[0] - (32*mm)]
+                tbl = zebra_table(make_long_table(header, rows, colw))
+                block.append(Paragraph("<b>Detail: Restrictions (descriptive)</b>", styles["SmallX"]))
+                block.append(Spacer(1, 3))
+                block.append(tbl)
+                block.append(Spacer(1, 6))
+
+            # Source + recommendation
+            if it.source:
+                block.append(Paragraph(f"<font color='#64748b'><b>Source:</b> {esc(it.source)}</font>", styles["TinyX"]))
+            if it.remediation:
+                block.append(Paragraph(f"<b>Recommendation:</b> {esc(it.remediation)}", styles["SmallX"]))
+
+            block.append(Spacer(1, 10))
+            story.append(KeepTogether(block))
+
+        story.append(PageBreak())
+
+    # API call log appendix
+    story.append(Paragraph("Appendix: API call log", styles["H1X"]))
+    story.append(Spacer(1, 6))
+    rows = []
+    for c in report.api_calls:
+        line = f"{c.operation} | ok={c.ok} | http={c.status_code or ''} | {c.duration_ms}ms"
+        if c.error:
+            line += f" | {c.error}"
+        rows.append([P(line, "TinyX")])
+    tbl = zebra_table(make_long_table(["Call"], rows, [A4[0] - (32*mm)]))
+    story.append(tbl)
+
+    doc.build(story, onFirstPage=header_footer, onLaterPages=header_footer)
+    return buf.getvalue()
+
+
     def header_footer(canvas, doc_):
         canvas.saveState()
         y = A4[1] - 12 * mm
@@ -1300,6 +1627,27 @@ def _rate_line(r: Dict[str, Any], is_base: bool) -> str:
         bits.append(f"BaseRateId={r.get('BaseRateId')}")
     prefix = "Base rate" if is_base else "Derived rate"
     return f"{prefix}: {name} | RateId={r.get('Id')} | " + ", ".join(bits)
+
+def _rate_flags(r: Dict[str, Any]) -> str:
+    bits = []
+    if r.get("Code"):
+        bits.append(f"Code={r.get('Code')}")
+    if r.get("Type"):
+        bits.append(f"Type={r.get('Type')}")
+    if r.get("IsPublic") is not None:
+        bits.append(f"Public={yn(r.get('IsPublic'))}")
+    if r.get("IsPrivate") is not None:
+        bits.append(f"Private={yn(r.get('IsPrivate'))}")
+    if r.get("IsActive") is not None:
+        bits.append(f"Active={yn(r.get('IsActive'))}")
+    if r.get("IsEnabled") is not None:
+        bits.append(f"Enabled={yn(r.get('IsEnabled'))}")
+    if r.get("IsDefault") is not None:
+        bits.append(f"Default={yn(r.get('IsDefault'))}")
+    if r.get("ExternalIdentifier"):
+        bits.append(f"ExtId={r.get('ExternalIdentifier')}")
+    return ", ".join(bits)
+
 
 
 # =========================
