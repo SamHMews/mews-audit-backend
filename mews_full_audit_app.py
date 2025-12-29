@@ -23,6 +23,7 @@ Notes:
 - Connector endpoint names/paths can vary by version. The client uses a flexible /{Resource}/{Operation} POST pattern.
   If your Connector base URL differs, set MEWS_CONNECTOR_BASE_URL env var.
 """
+from flask_cors import CORS
 
 import io
 import csv
@@ -1194,6 +1195,8 @@ HTML = """<!doctype html>
 # -----------------------------
 
 app = Flask(__name__)
+CORS(app, resources={r"/audit": {"origins": ["https://samhmews.github.io"]}})
+
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-change-me")
 
 limiter = Limiter(
