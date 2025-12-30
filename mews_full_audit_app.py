@@ -1,14 +1,15 @@
 # =========================================================
-# mews_full_audit_app.py — Full replacement (v6)
+# mews_full_audit_app.py — Full replacement (v10)
 # Start command: gunicorn mews_full_audit_app:app
 # =========================================================
 #
-# v6 changes (per Sam's requirements):
-# - NEEDS_INPUT: Any section where required API calls failed is marked NEEDS_INPUT (and error surfaced)
-# - Product mapping Tax %: uses configured taxation rate (via Taxations/GetAll) when available
-# - Logo: defaults to Mews SVG logo URL if LOGO_URL env var is not set
-# - Spaces & resource categories: fetch ResourceCategories per ServiceId; then fetch Assignments using ResourceCategoryIds
-#   (avoids tenant validation errors and prevents "UNASSIGNED everywhere" when assignments are available)
+# v10 changes (since v7/v8):
+# - Product mapping now uses Gross/Net/VAT columns (VAT = Gross - Net)
+#   - Fast path: use Products/GetAll -> Price (if GrossValue/NetValue are present)
+#   - Fallback: Products/GetPricing for products missing gross/net, but budgeted+concurrent to avoid Gunicorn timeouts
+# - Adds requests.Session pooling and per-call timeout support in MewsConnector
+# - NEEDS_INPUT persists and flags pricing sections when GetPricing is restricted or budgeted out
+# - Logo resized/aligned to sit top-right on the same line as the title
 #
 # =========================================================
 
@@ -20,6 +21,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
+BUILD_TAG = "v10"
 from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
 
@@ -1182,7 +1185,7 @@ def build_pdf(report: AuditReport) -> bytes:
 
         # Title on the left
         canvas.setFont("Helvetica-Bold", 12.5)
-        canvas.drawString(16 * mm, top_y - 3 * mm, "Mews Configuration Audit Report")
+        canvas.drawString(16 * mm, top_y - 3 * mm, f"Mews Configuration Audit Report  ({BUILD_TAG})")
 
         # Page number to the left of the logo box (so it never overlaps)
         canvas.setFont("Helvetica", 8.5)
