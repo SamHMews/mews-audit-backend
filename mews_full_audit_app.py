@@ -298,6 +298,60 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
     cashiers = fetch_list("cashiers_getall", "Cashiers", "GetAll",
                           {"EnterpriseIds": enterprises} if enterprises else {}, "Cashiers")
 
+    # Product pricing (gross/net) via Products/GetPricing (Restricted / beta).
+    # We request 1 day window at today's 00:00Z to get a single time unit price.
+    product_pricing: Dict[str, Dict[str, Optional[float]]] = {}
+    pricing_errors: List[str] = []
+
+    def _midnight_utc(dt: datetime) -> datetime:
+        d = dt.astimezone(timezone.utc)
+        return datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
+
+    if products:
+        first = _midnight_utc(utc_now())
+        first_s = first.strftime("%Y-%m-%dT%H:%M:%SZ")
+        # default "one time unit" attempt: last == first
+        last_same = first_s
+        # fallback: next day
+        last_next = (first + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        for p in products:
+            pid = p.get("Id") if isinstance(p, dict) else None
+            if not isinstance(pid, str) or not pid:
+                continue
+            try:
+                payload = {
+                    "ProductId": pid,
+                    "FirstTimeUnitStartUtc": first_s,
+                    "LastTimeUnitStartUtc": last_same,
+                }
+                if enterprises:
+                    payload["EnterpriseIds"] = enterprises
+
+                resp = mc.get("Products", "GetPricing", payload)
+                base_prices = resp.get("BaseAmountPrices") if isinstance(resp, dict) else None
+                if not (isinstance(base_prices, list) and base_prices):
+                    # retry with next day window if API expects Last > First
+                    payload["LastTimeUnitStartUtc"] = last_next
+                    resp = mc.get("Products", "GetPricing", payload)
+                    base_prices = resp.get("BaseAmountPrices") if isinstance(resp, dict) else None
+
+                gross = net = None
+                if isinstance(base_prices, list) and base_prices:
+                    g, n = amount_gross_net(base_prices[0])
+                    gross, net = g, n
+
+                product_pricing[pid] = {"Gross": gross, "Net": net}
+            except Exception as e:
+                product_pricing[pid] = {"Gross": None, "Net": None}
+                # Keep a short error list to mark NEEDS_INPUT without bloating the PDF.
+                msg = str(e)
+                if len(pricing_errors) < 10:
+                    pricing_errors.append(msg)
+
+        if pricing_errors:
+            errors["product_pricing_getpricing"] = " | ".join(pricing_errors)
+
     return {
         "cfg": cfg,
         "enterprises": enterprises,
@@ -316,6 +370,7 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
         "rules": rules,
         "tax_environments": tax_envs,
         "taxations": taxations,
+        "product_pricing": product_pricing,
         "counters": counters,
         "cashiers": cashiers,
         "errors": errors,
@@ -370,6 +425,29 @@ def money_from_extended_amount(ext: Any) -> str:
         if v is not None:
             return f"{v:.2f}"
     return ""
+
+
+def amount_gross_net(amount: Any) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Extract gross/net from a Mews Amount object.
+    Common shapes include GrossValue/NetValue, or Value with Tax, etc.
+    """
+    if not isinstance(amount, dict):
+        return None, None
+    gross = safe_float(amount.get("GrossValue"))
+    net = safe_float(amount.get("NetValue"))
+    if gross is not None or net is not None:
+        return gross, net
+
+    # Some Amount variants
+    gross = safe_float(amount.get("Gross"))
+    net = safe_float(amount.get("Net"))
+    if gross is not None or net is not None:
+        return gross, net
+
+    # Fallback: a single Value may be net or gross; can't infer reliably
+    val = safe_float(amount.get("Value") or amount.get("Amount"))
+    return None, val if val is not None else (None, None)
 
 
 def configured_tax_percent_for_product(product: Dict[str, Any], taxations: List[Dict[str, Any]]) -> str:
@@ -516,19 +594,34 @@ def build_accounting_categories_table(accounting_categories: List[Dict[str, Any]
 
 def build_product_mapping_table(products: List[Dict[str, Any]],
                                 accounting_categories: List[Dict[str, Any]],
-                                taxations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    cat_by_id = {c.get("Id"): c for c in accounting_categories if c.get("Id")}
+                                product_pricing: Dict[str, Dict[str, Optional[float]]]) -> List[Dict[str, Any]]:
+    cat_by_id = {c.get("Id"): c for c in accounting_categories if isinstance(c, dict) and c.get("Id")}
     rows: List[Dict[str, Any]] = []
+
     for p in products:
+        if not isinstance(p, dict):
+            continue
         cat = cat_by_id.get(p.get("AccountingCategoryId"))
-        tax_pct = configured_tax_percent_for_product(p, taxations)
+        pid = p.get("Id")
+        pricing = product_pricing.get(pid, {}) if isinstance(pid, str) else {}
+        gross = pricing.get("Gross")
+        net = pricing.get("Net")
+        vat = None
+        if gross is not None and net is not None:
+            vat = gross - net
+
+        def fmt(x: Optional[float]) -> str:
+            return "" if x is None else f"{x:.2f}"
+
         rows.append({
             "Product": pick_name(p) or "",
             "Accounting category": (cat.get("Name") if isinstance(cat, dict) else "UNMAPPED") or "UNMAPPED",
-            "Base price": money_from_extended_amount(p.get("Price")),
-            "VAT %": tax_pct or "",
+            "Gross": fmt(gross),
+            "Net": fmt(net),
+            "VAT": fmt(vat),
             "Charging": p.get("ChargingMode") or "",
         })
+
     rows.sort(key=lambda x: (x.get("Accounting category") or "", x.get("Product") or ""))
     return rows
 
@@ -740,7 +833,7 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
     errors = data.get("errors", {}) or {}
 
     acc_categories_table = build_accounting_categories_table(accounting_categories, products, services)
-    product_mapping_table = build_product_mapping_table(products, accounting_categories, taxations)
+    product_mapping_table = build_product_mapping_table(products, accounting_categories, data.get("product_pricing", {}) or {})
     spaces_table = build_spaces_table(resources, resource_categories, rca)
     rate_groups_table = build_rate_groups_table(rate_groups)
     rates_table = build_rates_table(rates, rate_groups)
@@ -794,7 +887,7 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
         risk="High"
     ))
 
-    st_prod, err_prod = status_for(["products_getall", "taxations_getall"], "PASS" if products else "WARN")
+    st_prod, err_prod = status_for(["products_getall", "product_pricing_getpricing"], "PASS" if products else "WARN")
     s = f"Products returned: {len(products)}"
     if err_prod:
         s += f" | {err_prod}"
@@ -802,8 +895,8 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
         key="Product mapping (product → accounting category)",
         status=st_prod,
         summary=s,
-        source="Connector: Products/GetAll + AccountingCategories/GetAll + Taxations/GetAll",
-        remediation="Validate each product is mapped to the correct accounting category, uses the intended taxation, and has the correct charging mode.",
+        source="Connector: Products/GetAll + Products/GetPricing + AccountingCategories/GetAll",
+        remediation="Validate each product is mapped to the correct accounting category, and that gross/net/VAT pricing returned by Products/GetPricing matches expectations. If GetPricing is restricted for this token, grant access or accept NEEDS_INPUT for this section.",
         details={"ProductMappingTable": product_mapping_table},
         risk="High"
     ))
@@ -1025,11 +1118,12 @@ def build_pdf(report: AuditReport) -> bytes:
         right_x = A4[0] - 16 * mm
 
         # Target logo box (approx red box): 30mm wide x 10mm high
-        target_w = 30 * mm
-        target_h = 10 * mm
+        target_w = 28 * mm
+        target_h = 5.2 * mm
 
         x_logo = right_x - target_w
-        y_logo = top_y - target_h
+        title_y = top_y - 3 * mm
+        y_logo = title_y - 2.2 * mm
 
         if logo:
             try:
@@ -1124,9 +1218,9 @@ def build_pdf(report: AuditReport) -> bytes:
             if "ProductMappingTable" in details:
                 render_dict_table(
                     "Product mapping",
-                    ["Product", "Accounting category", "Base price", "VAT %", "Charging"],
+                    ["Product", "Accounting category", "Gross", "Net", "VAT", "Charging"],
                     details.get("ProductMappingTable") or [],
-                    [68*mm, 58*mm, 20*mm, 18*mm, 24*mm],
+                    [56*mm, 46*mm, 18*mm, 18*mm, 18*mm, 24*mm],
                 )
 
             if "SpacesTable" in details:
