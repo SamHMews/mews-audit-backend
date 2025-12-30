@@ -111,8 +111,9 @@ class MewsConnector:
         self.access_token = access_token.strip()
         self.client_name = client_name
         self.calls: List[ApiCall] = []
+        self._session = requests.Session()
 
-    def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _post(self, path: str, payload: Dict[str, Any], timeout: Optional[int] = None) -> Dict[str, Any]:
         url = f"{self.base_url}/{path.lstrip('/')}"
         body = dict(payload)
         body.setdefault("ClientToken", self.client_token)
@@ -122,7 +123,7 @@ class MewsConnector:
         t0 = time.time()
         resp = None
         try:
-            resp = requests.post(url, json=body, timeout=DEFAULT_TIMEOUT)
+            resp = self._session.post(url, json=body, timeout=(timeout or DEFAULT_TIMEOUT))
             dt = int((time.time() - t0) * 1000)
 
             try:
@@ -149,8 +150,8 @@ class MewsConnector:
                 self.calls.append(ApiCall(operation=path, ok=False, status_code=None, duration_ms=dt, error=str(e)))
             raise
 
-    def get(self, domain: str, operation: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return self._post(f"{domain}/{operation}", payload)
+    def get(self, domain: str, operation: str, payload: Dict[str, Any], timeout: Optional[int] = None) -> Dict[str, Any]:
+        return self._post(f"{domain}/{operation}", payload, timeout=timeout)
 
     def paged_get_all(
         self,
@@ -297,60 +298,87 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
                           {"EnterpriseIds": enterprises} if enterprises else {}, "Counters")
     cashiers = fetch_list("cashiers_getall", "Cashiers", "GetAll",
                           {"EnterpriseIds": enterprises} if enterprises else {}, "Cashiers")
+# Product pricing (gross/net) via Products/GetPricing (Restricted / beta).
+# NOTE: This can be slow if a property has many products. To avoid Gunicorn worker timeouts
+# on small instances, we fetch pricing concurrently with a strict time budget.
+product_pricing: Dict[str, Dict[str, Optional[float]]] = {}
+pricing_errors: List[str] = []
 
-    # Product pricing (gross/net) via Products/GetPricing (Restricted / beta).
-    # We request 1 day window at today's 00:00Z to get a single time unit price.
-    product_pricing: Dict[str, Dict[str, Optional[float]]] = {}
-    pricing_errors: List[str] = []
+PRICING_MAX_WORKERS = int(os.getenv("PRODUCT_PRICING_MAX_WORKERS", "6"))
+PRICING_TIMEOUT_S = int(os.getenv("PRODUCT_PRICING_HTTP_TIMEOUT_SECONDS", "8"))
+PRICING_BUDGET_S = int(os.getenv("PRODUCT_PRICING_BUDGET_SECONDS", "18"))
 
-    def _midnight_utc(dt: datetime) -> datetime:
-        d = dt.astimezone(timezone.utc)
-        return datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
+def _midnight_utc(dt: datetime) -> datetime:
+    d = dt.astimezone(timezone.utc)
+    return datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
 
-    if products:
-        first = _midnight_utc(utc_now())
-        first_s = first.strftime("%Y-%m-%dT%H:%M:%SZ")
-        # default "one time unit" attempt: last == first
-        last_same = first_s
-        # fallback: next day
-        last_next = (first + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _fetch_pricing(pid: str, first_s: str, last_same: str, last_next: str) -> Tuple[str, Optional[float], Optional[float], Optional[str]]:
+    try:
+        payload = {
+            "ProductId": pid,
+            "FirstTimeUnitStartUtc": first_s,
+            "LastTimeUnitStartUtc": last_same,
+        }
+        if enterprises:
+            payload["EnterpriseIds"] = enterprises
 
-        for p in products:
-            pid = p.get("Id") if isinstance(p, dict) else None
-            if not isinstance(pid, str) or not pid:
-                continue
-            try:
-                payload = {
-                    "ProductId": pid,
-                    "FirstTimeUnitStartUtc": first_s,
-                    "LastTimeUnitStartUtc": last_same,
-                }
-                if enterprises:
-                    payload["EnterpriseIds"] = enterprises
+        resp = mc.get("Products", "GetPricing", payload, timeout=PRICING_TIMEOUT_S)
+        base_prices = resp.get("BaseAmountPrices") if isinstance(resp, dict) else None
+        if not (isinstance(base_prices, list) and base_prices):
+            # retry with next day window if API expects Last > First
+            payload["LastTimeUnitStartUtc"] = last_next
+            resp = mc.get("Products", "GetPricing", payload, timeout=PRICING_TIMEOUT_S)
+            base_prices = resp.get("BaseAmountPrices") if isinstance(resp, dict) else None
 
-                resp = mc.get("Products", "GetPricing", payload)
-                base_prices = resp.get("BaseAmountPrices") if isinstance(resp, dict) else None
-                if not (isinstance(base_prices, list) and base_prices):
-                    # retry with next day window if API expects Last > First
-                    payload["LastTimeUnitStartUtc"] = last_next
-                    resp = mc.get("Products", "GetPricing", payload)
-                    base_prices = resp.get("BaseAmountPrices") if isinstance(resp, dict) else None
+        gross = net = None
+        if isinstance(base_prices, list) and base_prices:
+            g, n = amount_gross_net(base_prices[0])
+            gross, net = g, n
+        return pid, gross, net, None
+    except Exception as e:
+        return pid, None, None, str(e)
 
-                gross = net = None
-                if isinstance(base_prices, list) and base_prices:
-                    g, n = amount_gross_net(base_prices[0])
-                    gross, net = g, n
+if products:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time as _time
 
+    first = _midnight_utc(utc_now())
+    first_s = first.strftime("%Y-%m-%dT%H:%M:%SZ")
+    last_same = first_s
+    last_next = (first + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    product_ids = [p.get("Id") for p in products if isinstance(p, dict) and isinstance(p.get("Id"), str) and p.get("Id")]
+    started = _time.time()
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=max(1, PRICING_MAX_WORKERS)) as ex:
+        futures = {ex.submit(_fetch_pricing, pid, first_s, last_same, last_next): pid for pid in product_ids}
+
+        try:
+            for fut in as_completed(futures, timeout=max(1, PRICING_BUDGET_S)):
+                pid, gross, net, err = fut.result()
                 product_pricing[pid] = {"Gross": gross, "Net": net}
-            except Exception as e:
-                product_pricing[pid] = {"Gross": None, "Net": None}
-                # Keep a short error list to mark NEEDS_INPUT without bloating the PDF.
-                msg = str(e)
-                if len(pricing_errors) < 10:
-                    pricing_errors.append(msg)
+                completed += 1
+                if err and len(pricing_errors) < 10:
+                    pricing_errors.append(err)
 
-        if pricing_errors:
-            errors["product_pricing_getpricing"] = " | ".join(pricing_errors)
+                if (_time.time() - started) >= PRICING_BUDGET_S:
+                    break
+        except Exception:
+            pass
+
+        for fut, pid in futures.items():
+            if not fut.done():
+                fut.cancel()
+                if pid not in product_pricing:
+                    product_pricing[pid] = {"Gross": None, "Net": None}
+
+    if completed < len(product_ids):
+        pricing_errors.append(f"Pricing fetch timed out under budget: completed {completed}/{len(product_ids)} products. Increase PRODUCT_PRICING_BUDGET_SECONDS or reduce PRODUCT_PRICING_MAX_WORKERS.")
+
+    if pricing_errors:
+        errors["product_pricing_getpricing"] = " | ".join(pricing_errors)
+
 
     return {
         "cfg": cfg,
