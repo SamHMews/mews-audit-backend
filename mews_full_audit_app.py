@@ -373,8 +373,83 @@ def money_from_extended_amount(ext: Any) -> str:
 
 
 def configured_tax_percent_for_product(product: Dict[str, Any], taxations: List[Dict[str, Any]]) -> str:
+    """
+    Return configured VAT % for a product.
+    Priority:
+    1) Product-level Taxations (list) if it contains dicts with a rate/percent
+    2) Product TaxationId / TaxationIds / TaxId -> look up in Taxations/GetAll
+    3) Fallback direct fields if present
+    """
     if not isinstance(product, dict):
         return ""
+
+    # 1) If the product already contains taxation objects, prefer those.
+    tx_list = product.get("Taxations")
+    if isinstance(tx_list, list) and tx_list:
+        first = tx_list[0]
+        if isinstance(first, dict):
+            for k in ("Rate", "Percentage", "Percent", "Value"):
+                v = safe_float(first.get(k))
+                if v is not None:
+                    if 0 < v <= 1:
+                        v = v * 100
+                    return f"{v:.2f}%"
+            # Sometimes the object uses Id only
+            if first.get("Id"):
+                taxation_id = first.get("Id")
+            else:
+                taxation_id = None
+        elif isinstance(first, str):
+            taxation_id = first
+        else:
+            taxation_id = None
+    else:
+        taxation_id = None
+
+    # 2) Resolve an id from common fields
+    if not taxation_id:
+        tid = product.get("TaxationId") or product.get("TaxId") or product.get("Taxation")
+        if isinstance(tid, dict):
+            # Sometimes "Taxation" is an object
+            for k in ("Rate", "Percentage", "Percent", "Value"):
+                v = safe_float(tid.get(k))
+                if v is not None:
+                    if 0 < v <= 1:
+                        v = v * 100
+                    return f"{v:.2f}%"
+            tid = tid.get("Id")
+        if not tid:
+            tids = product.get("TaxationIds")
+            if isinstance(tids, list) and tids:
+                tid = tids[0]
+        taxation_id = tid
+
+    # 3) Direct fields fallback (rare, but seen in some payload shapes)
+    for k in ("VatPercent", "VATPercent", "TaxPercent", "TaxRate"):
+        v = safe_float(product.get(k))
+        if v is not None:
+            if 0 < v <= 1:
+                v = v * 100
+            return f"{v:.2f}%"
+
+    if not taxation_id or not isinstance(taxations, list):
+        return ""
+
+    tx = None
+    for t in taxations:
+        if isinstance(t, dict) and t.get("Id") == taxation_id:
+            tx = t
+            break
+    if not isinstance(tx, dict):
+        return ""
+
+    for k in ("Rate", "Percentage", "Percent", "Value"):
+        v = safe_float(tx.get(k))
+        if v is not None:
+            if 0 < v <= 1:
+                v = v * 100
+            return f"{v:.2f}%"
+    return ""
     taxation_id = (
         product.get("TaxationId")
         or product.get("TaxId")
@@ -451,7 +526,7 @@ def build_product_mapping_table(products: List[Dict[str, Any]],
             "Product": pick_name(p) or "",
             "Accounting category": (cat.get("Name") if isinstance(cat, dict) else "UNMAPPED") or "UNMAPPED",
             "Base price": money_from_extended_amount(p.get("Price")),
-            "Tax %": tax_pct or "",
+            "VAT %": tax_pct or "",
             "Charging": p.get("ChargingMode") or "",
         })
     rows.sort(key=lambda x: (x.get("Accounting category") or "", x.get("Product") or ""))
@@ -461,26 +536,68 @@ def build_product_mapping_table(products: List[Dict[str, Any]],
 def build_spaces_table(resources: List[Dict[str, Any]],
                        resource_categories: List[Dict[str, Any]],
                        assignments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    cat_by_id = {c.get("Id"): c for c in resource_categories if c.get("Id")}
-    res_by_id = {r.get("Id"): r for r in resources if r.get("Id")}
+    """
+    Build a table of: resource category name, space name, state.
+
+    Mews tenants differ slightly in payload shape for ResourceCategoryAssignments.
+    Handle the common variants:
+      - ResourceId / ResourceCategoryId
+      - ResourceIds (list) / ResourceCategoryId
+      - ResourceId / CategoryId (or ResourceCategory) style keys
+    """
+    cat_by_id = {c.get("Id"): c for c in resource_categories if isinstance(c, dict) and c.get("Id")}
+    res_by_id = {r.get("Id"): r for r in resources if isinstance(r, dict) and r.get("Id")}
+
+    def get_category_id(a: Dict[str, Any]) -> Optional[str]:
+        cid = a.get("ResourceCategoryId") or a.get("CategoryId") or a.get("ResourceCategory")
+        if isinstance(cid, dict):
+            return cid.get("Id")
+        return cid if isinstance(cid, str) else None
+
+    def get_resource_ids(a: Dict[str, Any]) -> List[str]:
+        rid = a.get("ResourceId") or a.get("Resource")
+        if isinstance(rid, dict):
+            rid = rid.get("Id")
+        if isinstance(rid, str):
+            return [rid]
+        rids = a.get("ResourceIds")
+        if isinstance(rids, list):
+            return [x for x in rids if isinstance(x, str)]
+        # Some shapes use "Resources": [{"Id": ...}, ...]
+        rs = a.get("Resources")
+        if isinstance(rs, list):
+            out = []
+            for x in rs:
+                if isinstance(x, dict) and isinstance(x.get("Id"), str):
+                    out.append(x["Id"])
+            return out
+        return []
 
     rows: List[Dict[str, Any]] = []
-    for a in assignments:
-        rid = a.get("ResourceId")
-        cid = a.get("ResourceCategoryId")
-        r = res_by_id.get(rid) if rid else None
-        c = cat_by_id.get(cid) if cid else None
-        if not r:
-            continue
-        rows.append({
-            "Resource category": (pick_name(c) or (c.get("Name") if isinstance(c, dict) else "") or "UNASSIGNED") if c else "UNASSIGNED",
-            "Space": r.get("Name") or "",
-            "State": r.get("State") or "",
-        })
+    assigned_resource_ids: set = set()
 
-    assigned = {a.get("ResourceId") for a in assignments if a.get("ResourceId")}
+    for a in assignments:
+        if not isinstance(a, dict):
+            continue
+        cid = get_category_id(a)
+        c = cat_by_id.get(cid) if cid else None
+        cat_name = (pick_name(c) or (c.get("Name") if isinstance(c, dict) else "") or "UNASSIGNED") if c else "UNASSIGNED"
+
+        for rid in get_resource_ids(a):
+            r = res_by_id.get(rid)
+            if not r:
+                continue
+            assigned_resource_ids.add(rid)
+            rows.append({
+                "Resource category": cat_name,
+                "Space": r.get("Name") or "",
+                "State": r.get("State") or "",
+            })
+
+    # Add truly unassigned spaces (no assignment rows matched their IDs)
     for r in resources:
-        if r.get("Id") and r.get("Id") not in assigned:
+        rid = r.get("Id")
+        if isinstance(rid, str) and rid not in assigned_resource_ids:
             rows.append({
                 "Resource category": "UNASSIGNED",
                 "Space": r.get("Name") or "",
@@ -903,20 +1020,39 @@ def build_pdf(report: AuditReport) -> bytes:
 
     def header_footer(canvas, doc_):
         canvas.saveState()
-        y = A4[1] - 12 * mm
+
+        top_y = A4[1] - 10 * mm  # near top margin
+        right_x = A4[0] - 16 * mm
+
+        # Target logo box (approx red box): 30mm wide x 10mm high
+        target_w = 30 * mm
+        target_h = 10 * mm
+
+        x_logo = right_x - target_w
+        y_logo = top_y - target_h
+
         if logo:
             try:
-                renderPDF.draw(logo, canvas, 16 * mm, y - (logo.height or 0))
+                lw = float(getattr(logo, "width", 0) or 0)
+                lh = float(getattr(logo, "height", 0) or 0)
+                if lw > 0 and lh > 0:
+                    s = min(target_w / lw, target_h / lh)
+                    canvas.saveState()
+                    canvas.translate(x_logo, y_logo)
+                    canvas.scale(s, s)
+                    renderPDF.draw(logo, canvas, 0, 0)
+                    canvas.restoreState()
             except Exception:
                 pass
-            canvas.setFont("Helvetica-Bold", 12.5)
-            canvas.drawString(16 * mm + 44 * mm, y - 3 * mm, "Mews Configuration Audit Report")
-        else:
-            canvas.setFont("Helvetica-Bold", 12.5)
-            canvas.drawString(16 * mm, y - 3 * mm, "Mews Configuration Audit Report")
 
+        # Title on the left
+        canvas.setFont("Helvetica-Bold", 12.5)
+        canvas.drawString(16 * mm, top_y - 3 * mm, "Mews Configuration Audit Report")
+
+        # Page number to the left of the logo box (so it never overlaps)
         canvas.setFont("Helvetica", 8.5)
-        canvas.drawRightString(A4[0] - 16 * mm, y - 3 * mm, f"Page {doc_.page}")
+        canvas.drawRightString(x_logo - 3 * mm, top_y - 3 * mm, f"Page {doc_.page}")
+
         canvas.restoreState()
 
     story: List[Any] = []
@@ -988,7 +1124,7 @@ def build_pdf(report: AuditReport) -> bytes:
             if "ProductMappingTable" in details:
                 render_dict_table(
                     "Product mapping",
-                    ["Product", "Accounting category", "Base price", "Tax %", "Charging"],
+                    ["Product", "Accounting category", "Base price", "VAT %", "Charging"],
                     details.get("ProductMappingTable") or [],
                     [68*mm, 58*mm, 20*mm, 18*mm, 24*mm],
                 )
