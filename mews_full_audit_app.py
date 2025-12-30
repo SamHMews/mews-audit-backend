@@ -954,7 +954,7 @@ def build_pdf(report: AuditReport) -> bytes:
             if it.source:
                 block.append(Paragraph(f"<font color='#64748b'><b>Source:</b> {esc(it.source)}</font>", styles["TinyX"]))
             if it.remediation:
-                block.append(Paragraph(f"<b>Recommendation:</b> {esc(it.remediation)}</b>", styles["SmallX"]))
+                block.append(Paragraph(f"<b>Recommendation:</b> {esc(it.remediation)}", styles["SmallX"]))
 
             block.append(Spacer(1, 10))
             story.append(KeepTogether(block))
