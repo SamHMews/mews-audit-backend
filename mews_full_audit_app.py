@@ -1,5 +1,5 @@
 # =========================================================
-# mews_full_audit_app.py — Full replacement (v10)
+# mews_full_audit_app.py — Full replacement (v11)
 # Start command: gunicorn mews_full_audit_app:app
 # =========================================================
 #
@@ -22,7 +22,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-BUILD_TAG = "v10"
+BUILD_TAG = "v11"
+
+ENABLE_PRODUCT_GETPRICING = os.getenv("ENABLE_PRODUCT_GETPRICING", "0") == "1"
 from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
 
