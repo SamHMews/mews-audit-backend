@@ -1,6 +1,15 @@
 # =========================================================
-# mews_full_audit_app.py — Full replacement (v3)
+# mews_full_audit_app.py — Full replacement (v6)
 # Start command: gunicorn mews_full_audit_app:app
+# =========================================================
+#
+# v6 changes (per Sam's requirements):
+# - NEEDS_INPUT: Any section where required API calls failed is marked NEEDS_INPUT (and error surfaced)
+# - Product mapping Tax %: uses configured taxation rate (via Taxations/GetAll) when available
+# - Logo: defaults to Mews SVG logo URL if LOGO_URL env var is not set
+# - Spaces & resource categories: fetch ResourceCategories per ServiceId; then fetch Assignments using ResourceCategoryIds
+#   (avoids tenant validation errors and prevents "UNASSIGNED everywhere" when assignments are available)
+#
 # =========================================================
 
 import os
@@ -34,7 +43,10 @@ DEFAULT_API_BASE = os.getenv("MEWS_API_BASE_URL", "https://api.mews-demo.com/api
 DEFAULT_CLIENT_NAME = os.getenv("MEWS_CLIENT_NAME", "Mews Audit Tool 1.0.0")
 DEFAULT_TIMEOUT = int(os.getenv("MEWS_HTTP_TIMEOUT_SECONDS", "30"))
 MAX_PDF_MB = int(os.getenv("MAX_PDF_MB", "18"))
-LOGO_URL = os.getenv("LOGO_URL", "").strip()
+
+# Default to Mews logo if env var isn't set
+LOGO_URL = (os.getenv("LOGO_URL", "").strip()
+            or "https://www.mews.com/hubfs/_Project_Phoenix/images/logo/Mews%20Logo.svg")
 
 
 def utc_now() -> datetime:
@@ -161,7 +173,10 @@ class MewsConnector:
                 payload["Limitation"]["Cursor"] = cursor
 
             data = self.get(domain, operation, payload)
-            batch = data.get(result_key) or []
+
+            batch = data.get(result_key)
+            if batch is None:
+                batch = []
             if not isinstance(batch, list):
                 batch = []
 
@@ -179,104 +194,109 @@ class MewsConnector:
 
 
 # =========================
-# DATA COLLECTION (v3 fix)
+# DATA COLLECTION (v6)
 # =========================
 
 def collect_data(base_url: str, client_token: str, access_token: str, client_name: str = DEFAULT_CLIENT_NAME) -> Dict[str, Any]:
     mc = MewsConnector(base_url, client_token, access_token, client_name)
+    errors: Dict[str, str] = {}
 
-    cfg = mc.get("Configuration", "Get", {})
+    def fetch_list(key: str, domain: str, operation: str, payload: Dict[str, Any], result_key: str,
+                   count_per_page: int = 1000, hard_limit: int = 50000) -> List[Dict[str, Any]]:
+        try:
+            return mc.paged_get_all(domain, operation, payload, result_key, count_per_page=count_per_page, hard_limit=hard_limit)
+        except Exception as e:
+            errors[key] = str(e)
+            return []
+
+    cfg: Dict[str, Any] = {}
+    try:
+        cfg = mc.get("Configuration", "Get", {})
+    except Exception as e:
+        errors["configuration_get"] = str(e)
+        cfg = {}
+
     ent = (cfg.get("Enterprise") or {}) if isinstance(cfg, dict) else {}
     ent_id = ent.get("Id")
     enterprises = [ent_id] if ent_id else []
 
-    services = mc.paged_get_all("Services", "GetAll", {"EnterpriseIds": enterprises} if enterprises else {}, "Services")
+    services = fetch_list("services_getall", "Services", "GetAll",
+                          {"EnterpriseIds": enterprises} if enterprises else {}, "Services")
     service_ids = [s.get("Id") for s in services if isinstance(s, dict) and s.get("Id")]
 
-    # Service-scoped endpoints
     if service_ids:
-        rate_groups = mc.paged_get_all("RateGroups", "GetAll", {"ServiceIds": service_ids}, "RateGroups")
-        rates = mc.paged_get_all("Rates", "GetAll", {"ServiceIds": service_ids}, "Rates")
-        products = mc.paged_get_all("Products", "GetAll", {"ServiceIds": service_ids}, "Products")
-        restrictions = mc.paged_get_all("Restrictions", "GetAll", {"ServiceIds": service_ids}, "Restrictions")
-        resource_categories = mc.paged_get_all("ResourceCategories", "GetAll", {"ServiceIds": service_ids}, "ResourceCategories")
+        rate_groups = fetch_list("rate_groups_getall", "RateGroups", "GetAll", {"ServiceIds": service_ids}, "RateGroups")
+        rates = fetch_list("rates_getall", "Rates", "GetAll", {"ServiceIds": service_ids}, "Rates")
+        products = fetch_list("products_getall", "Products", "GetAll", {"ServiceIds": service_ids}, "Products")
+        restrictions = fetch_list("restrictions_getall", "Restrictions", "GetAll", {"ServiceIds": service_ids}, "Restrictions")
     else:
-        rate_groups, rates, products, restrictions, resource_categories = [], [], [], [], []
+        rate_groups, rates, products, restrictions = [], [], [], []
+        if "services_getall" not in errors:
+            errors["services_missing"] = "No ServiceIds found; service-scoped data cannot be retrieved."
 
-    # Enterprise-scoped endpoints
-    accounting_categories = mc.paged_get_all("AccountingCategories", "GetAll", {"EnterpriseIds": enterprises} if enterprises else {}, "AccountingCategories")
-    resources = mc.paged_get_all("Resources", "GetAll", {"EnterpriseIds": enterprises} if enterprises else {}, "Resources")
+    # Resource categories per service
+    resource_categories: List[Dict[str, Any]] = []
+    if service_ids:
+        for sid in service_ids:
+            cats = fetch_list(f"resource_categories_getall_{sid}", "ResourceCategories", "GetAll",
+                              {"ServiceIds": [sid]}, "ResourceCategories")
+            if cats:
+                resource_categories.extend(cats)
+    else:
+        resource_categories = []
 
-    # 🔧 Tenant-specific validation:
-    # Your tenant returns "Invalid ResourceCategoryIds" if we call Assignments without ResourceCategoryIds (or with empty).
-    # So: call Assignments with ResourceCategoryIds derived from ResourceCategories.
+    accounting_categories = fetch_list("accounting_categories_getall", "AccountingCategories", "GetAll",
+                                       {"EnterpriseIds": enterprises} if enterprises else {}, "AccountingCategories")
+    resources = fetch_list("resources_getall", "Resources", "GetAll",
+                           {"EnterpriseIds": enterprises} if enterprises else {}, "Resources")
+
+    tax_envs = fetch_list("tax_environments_getall", "TaxEnvironments", "GetAll",
+                          {"EnterpriseIds": enterprises} if enterprises else {}, "TaxEnvironments")
+    taxations = fetch_list("taxations_getall", "Taxations", "GetAll",
+                           {"EnterpriseIds": enterprises} if enterprises else {}, "Taxations")
+
     resource_category_assignments: List[Dict[str, Any]] = []
     try:
         rc_ids = [c.get("Id") for c in resource_categories if isinstance(c, dict) and c.get("Id")]
         if rc_ids:
             resource_category_assignments = mc.paged_get_all(
-                "ResourceCategoryAssignments",
-                "GetAll",
+                "ResourceCategoryAssignments", "GetAll",
                 {"ResourceCategoryIds": rc_ids},
                 "ResourceCategoryAssignments"
             )
         else:
             resource_category_assignments = []
-    except Exception:
-        # Do not fail the whole audit on this endpoint
+    except Exception as e:
+        errors["resource_category_assignments_getall"] = str(e)
         resource_category_assignments = []
 
-    # Payments window (last 30 days)
     payments: List[Dict[str, Any]] = []
     try:
         start = (utc_now() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
         end = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
         payments = mc.paged_get_all(
-            "Payments",
-            "GetAll",
+            "Payments", "GetAll",
             {"EnterpriseIds": enterprises, "CreatedUtc": {"StartUtc": start, "EndUtc": end}},
             "Payments",
-            count_per_page=500,
-            hard_limit=20000,
+            count_per_page=500, hard_limit=20000,
         )
-    except Exception:
+    except Exception as e:
+        errors["payments_getall"] = str(e)
         payments = []
 
     cancellation_policies: List[Dict[str, Any]] = []
-    try:
-        if service_ids:
-            cancellation_policies = mc.paged_get_all("CancellationPolicies", "GetAll", {"ServiceIds": service_ids}, "CancellationPolicies")
-    except Exception:
-        cancellation_policies = []
+    if service_ids:
+        cancellation_policies = fetch_list("cancellation_policies_getall", "CancellationPolicies", "GetAll",
+                                           {"ServiceIds": service_ids}, "CancellationPolicies")
 
     rules: List[Dict[str, Any]] = []
-    try:
-        if service_ids:
-            rules = mc.paged_get_all("Rules", "GetAll", {"ServiceIds": service_ids}, "Rules")
-    except Exception:
-        rules = []
+    if service_ids:
+        rules = fetch_list("rules_getall", "Rules", "GetAll", {"ServiceIds": service_ids}, "Rules")
 
-    tax_envs: List[Dict[str, Any]] = []
-    taxations: List[Dict[str, Any]] = []
-    try:
-        tax_envs = mc.paged_get_all("TaxEnvironments", "GetAll", {"EnterpriseIds": enterprises} if enterprises else {}, "TaxEnvironments")
-    except Exception:
-        tax_envs = []
-    try:
-        taxations = mc.paged_get_all("Taxations", "GetAll", {"EnterpriseIds": enterprises} if enterprises else {}, "Taxations")
-    except Exception:
-        taxations = []
-
-    counters: List[Dict[str, Any]] = []
-    cashiers: List[Dict[str, Any]] = []
-    try:
-        counters = mc.paged_get_all("Counters", "GetAll", {"EnterpriseIds": enterprises} if enterprises else {}, "Counters")
-    except Exception:
-        counters = []
-    try:
-        cashiers = mc.paged_get_all("Cashiers", "GetAll", {"EnterpriseIds": enterprises} if enterprises else {}, "Cashiers")
-    except Exception:
-        cashiers = []
+    counters = fetch_list("counters_getall", "Counters", "GetAll",
+                          {"EnterpriseIds": enterprises} if enterprises else {}, "Counters")
+    cashiers = fetch_list("cashiers_getall", "Cashiers", "GetAll",
+                          {"EnterpriseIds": enterprises} if enterprises else {}, "Cashiers")
 
     return {
         "cfg": cfg,
@@ -298,6 +318,7 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
         "taxations": taxations,
         "counters": counters,
         "cashiers": cashiers,
+        "errors": errors,
         "api_calls": [c.__dict__ for c in mc.calls],
     }
 
@@ -351,25 +372,31 @@ def money_from_extended_amount(ext: Any) -> str:
     return ""
 
 
-def tax_percent_from_extended_amount(ext: Any) -> str:
-    if not isinstance(ext, dict):
+def configured_tax_percent_for_product(product: Dict[str, Any], taxations: List[Dict[str, Any]]) -> str:
+    if not isinstance(product, dict):
         return ""
-    net = safe_float(ext.get("NetValue"))
-    gross = safe_float(ext.get("GrossValue"))
-    tax_total = 0.0
-    if isinstance(ext.get("TaxValues"), list):
-        for tv in ext["TaxValues"]:
-            if isinstance(tv, dict):
-                v = safe_float(tv.get("Value"))
-                if v is not None:
-                    tax_total += v
-    if tax_total > 0 and net and net > 0:
-        return f"{(tax_total / net) * 100:.2f}%"
-    if net and gross and net > 0 and gross >= net:
-        return f"{((gross - net) / net) * 100:.2f}%"
-    rate = safe_float(ext.get("TaxRate"))
-    if rate is not None:
-        return f"{rate:.2f}%"
+    taxation_id = (
+        product.get("TaxationId")
+        or product.get("TaxId")
+        or product.get("Taxation")
+        or (product.get("Taxations")[0] if isinstance(product.get("Taxations"), list) and product.get("Taxations") else None)
+        or (product.get("TaxationIds")[0] if isinstance(product.get("TaxationIds"), list) and product.get("TaxationIds") else None)
+    )
+    if not taxation_id or not isinstance(taxations, list):
+        return ""
+    tx = None
+    for t in taxations:
+        if isinstance(t, dict) and t.get("Id") == taxation_id:
+            tx = t
+            break
+    if not isinstance(tx, dict):
+        return ""
+    for k in ("Rate", "Percentage", "Percent", "Value"):
+        v = safe_float(tx.get(k))
+        if v is not None:
+            if 0 < v <= 1:
+                v = v * 100
+            return f"{v:.2f}%"
     return ""
 
 
@@ -413,16 +440,18 @@ def build_accounting_categories_table(accounting_categories: List[Dict[str, Any]
 
 
 def build_product_mapping_table(products: List[Dict[str, Any]],
-                                accounting_categories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+                                accounting_categories: List[Dict[str, Any]],
+                                taxations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     cat_by_id = {c.get("Id"): c for c in accounting_categories if c.get("Id")}
     rows: List[Dict[str, Any]] = []
     for p in products:
         cat = cat_by_id.get(p.get("AccountingCategoryId"))
+        tax_pct = configured_tax_percent_for_product(p, taxations)
         rows.append({
             "Product": pick_name(p) or "",
             "Accounting category": (cat.get("Name") if isinstance(cat, dict) else "UNMAPPED") or "UNMAPPED",
             "Base price": money_from_extended_amount(p.get("Price")),
-            "Tax %": tax_percent_from_extended_amount(p.get("Price")),
+            "Tax %": tax_pct or "",
             "Charging": p.get("ChargingMode") or "",
         })
     rows.sort(key=lambda x: (x.get("Accounting category") or "", x.get("Product") or ""))
@@ -444,7 +473,7 @@ def build_spaces_table(resources: List[Dict[str, Any]],
         if not r:
             continue
         rows.append({
-            "Resource category": (c.get("Name") if isinstance(c, dict) else "UNASSIGNED") or "UNASSIGNED",
+            "Resource category": (pick_name(c) or (c.get("Name") if isinstance(c, dict) else "") or "UNASSIGNED") if c else "UNASSIGNED",
             "Space": r.get("Name") or "",
             "State": r.get("State") or "",
         })
@@ -513,14 +542,6 @@ def summarise_restriction_exceptions(ex: Any) -> str:
         v = ex.get(k)
         if v:
             bits.append(f"{label}: {v}")
-    if isinstance(ex.get("MinPrice"), dict):
-        v = money_from_extended_amount(ex.get("MinPrice"))
-        if v:
-            bits.append(f"Min price: {v}")
-    if isinstance(ex.get("MaxPrice"), dict):
-        v = money_from_extended_amount(ex.get("MaxPrice"))
-        if v:
-            bits.append(f"Max price: {v}")
     return "; ".join(bits) if bits else "—"
 
 
@@ -570,7 +591,7 @@ def build_restrictions_table(restrictions: List[Dict[str, Any]],
         spaces_scope = "All spaces"
         if cond.get("ResourceCategoryId"):
             c = cat_by_id.get(cond.get("ResourceCategoryId"))
-            spaces_scope = (c.get("Name") if isinstance(c, dict) else "") or "All spaces"
+            spaces_scope = (pick_name(c) if isinstance(c, dict) else "") or "All spaces"
 
         rows.append({
             "Time": summarise_restriction_time(cond),
@@ -584,24 +605,25 @@ def build_restrictions_table(restrictions: List[Dict[str, Any]],
 
 
 def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "AuditReport":
-    cfg = data.get("cfg", {})
-    services = data.get("services", [])
-    rate_groups = data.get("rate_groups", [])
-    rates = data.get("rates", [])
-    accounting_categories = data.get("accounting_categories", [])
-    products = data.get("products", [])
-    payments = data.get("payments", [])
-    resources = data.get("resources", [])
-    resource_categories = data.get("resource_categories", [])
-    rca = data.get("resource_category_assignments", [])
-    restrictions = data.get("restrictions", [])
-    tax_envs = data.get("tax_environments", [])
-    taxations = data.get("taxations", [])
-    counters = data.get("counters", [])
-    cashiers = data.get("cashiers", [])
+    cfg = data.get("cfg", {}) or {}
+    services = data.get("services", []) or []
+    rate_groups = data.get("rate_groups", []) or []
+    rates = data.get("rates", []) or []
+    accounting_categories = data.get("accounting_categories", []) or []
+    products = data.get("products", []) or []
+    payments = data.get("payments", []) or []
+    resources = data.get("resources", []) or []
+    resource_categories = data.get("resource_categories", []) or []
+    rca = data.get("resource_category_assignments", []) or []
+    restrictions = data.get("restrictions", []) or []
+    tax_envs = data.get("tax_environments", []) or []
+    taxations = data.get("taxations", []) or []
+    counters = data.get("counters", []) or []
+    cashiers = data.get("cashiers", []) or []
+    errors = data.get("errors", {}) or {}
 
     acc_categories_table = build_accounting_categories_table(accounting_categories, products, services)
-    product_mapping_table = build_product_mapping_table(products, accounting_categories)
+    product_mapping_table = build_product_mapping_table(products, accounting_categories, taxations)
     spaces_table = build_spaces_table(resources, resource_categories, rca)
     rate_groups_table = build_rate_groups_table(rate_groups)
     rates_table = build_rates_table(rates, rate_groups)
@@ -611,39 +633,72 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
     enterprise_id = ent.get("Id") or (data.get("enterprises", [""])[0] if data.get("enterprises") else "")
     enterprise_name = ent.get("Name") or "Unknown"
 
+    def status_for(keys: List[str], default_ok: str) -> Tuple[str, str]:
+        errs = []
+        for k in keys:
+            if k in errors and errors[k]:
+                errs.append(f"{k}: {errors[k]}")
+        if errs:
+            return "NEEDS_INPUT", " | ".join(errs)
+        return default_ok, ""
+
     sections: List[Tuple[str, List[CheckItem]]] = []
 
     legal_items: List[CheckItem] = []
     tz = (cfg.get("Enterprise") or {}).get("TimeZone") if isinstance(cfg, dict) else None
     currency = (cfg.get("Enterprise") or {}).get("DefaultCurrency") if isinstance(cfg, dict) else None
+
+    st_tax, err_tax = status_for(["tax_environments_getall", "taxations_getall"], "PASS" if (tax_envs or taxations) else "WARN")
+    summary = f"TaxEnvironments={len(tax_envs)}, Taxations={len(taxations)}"
+    if err_tax:
+        summary += f" | {err_tax}"
     legal_items.append(CheckItem("Time zone", "PASS" if tz else "WARN", str(tz or "Not identified"), "Connector: Configuration/Get", "Set enterprise/property time zone in Mews if missing.", {}, "High" if not tz else "Low"))
     legal_items.append(CheckItem("Default currency", "PASS" if currency else "WARN", str(currency or "Not identified"), "Connector: Configuration/Get", "Ensure a default currency is set at enterprise level.", {}, "High" if not currency else "Low"))
-    legal_items.append(CheckItem("Tax environment + VAT/GST rates", "PASS" if (tax_envs or taxations) else "WARN", f"TaxEnvironments={len(tax_envs)}, Taxations={len(taxations)}", "Connector: TaxEnvironments/GetAll + Taxations/GetAll", "Validate tax environment selection and tax codes match jurisdiction.", {"TaxEnvironments": tax_envs[:200], "Taxations": taxations[:500]}, "Medium"))
+    legal_items.append(CheckItem("Tax environment + VAT/GST rates", st_tax, summary, "Connector: TaxEnvironments/GetAll + Taxations/GetAll", "Validate tax environment selection and tax codes match jurisdiction.", {"TaxEnvironments": tax_envs[:200], "Taxations": taxations[:500]}, "Medium"))
+
+    st_cfg, err_cfg = status_for(["configuration_get"], "PASS")
+    if err_cfg:
+        legal_items.append(CheckItem("Configuration retrieval", "NEEDS_INPUT", err_cfg, "Connector: Configuration/Get", "Confirm API base URL and tokens; ensure Connector API is accessible.", {}, "High"))
+
     sections.append(("Legal & property baseline", legal_items))
 
     accounting_items: List[CheckItem] = []
+    st_ac, err_ac = status_for(["accounting_categories_getall"], "PASS" if accounting_categories else "WARN")
+    s = f"Accounting categories returned: {len(accounting_categories)}"
+    if err_ac:
+        s += f" | {err_ac}"
     accounting_items.append(CheckItem(
         key="Accounting categories (list)",
-        status="PASS" if accounting_categories else "WARN",
-        summary=f"Accounting categories returned: {len(accounting_categories)}",
+        status=st_ac,
+        summary=s,
         source="Connector: AccountingCategories/GetAll",
         remediation="Review category codes/classifications and ledger mappings; confirm alignment with finance export.",
         details={"AccountingCategoriesTable": acc_categories_table},
         risk="High"
     ))
+
+    st_prod, err_prod = status_for(["products_getall", "taxations_getall"], "PASS" if products else "WARN")
+    s = f"Products returned: {len(products)}"
+    if err_prod:
+        s += f" | {err_prod}"
     accounting_items.append(CheckItem(
         key="Product mapping (product → accounting category)",
-        status="PASS" if products else "WARN",
-        summary=f"Products returned: {len(products)}",
-        source="Connector: Products/GetAll + AccountingCategories/GetAll",
-        remediation="Validate each product is mapped to the correct accounting category, has expected base price/tax, and charging mode.",
+        status=st_prod,
+        summary=s,
+        source="Connector: Products/GetAll + AccountingCategories/GetAll + Taxations/GetAll",
+        remediation="Validate each product is mapped to the correct accounting category, uses the intended taxation, and has the correct charging mode.",
         details={"ProductMappingTable": product_mapping_table},
         risk="High"
     ))
+
+    st_cash, err_cash = status_for(["cashiers_getall", "counters_getall"], "PASS" if (cashiers or counters) else "WARN")
+    s = f"Cashiers={len(cashiers)}, Counters={len(counters)}"
+    if err_cash:
+        s += f" | {err_cash}"
     accounting_items.append(CheckItem(
         key="Cash / counters",
-        status="PASS" if (cashiers or counters) else "WARN",
-        summary=f"Cashiers={len(cashiers)}, Counters={len(counters)}",
+        status=st_cash,
+        summary=s,
         source="Connector: Cashiers/GetAll + Counters/GetAll",
         remediation="Ensure cashiers are assigned and counters/numbering comply with local rules.",
         details={},
@@ -651,50 +706,76 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
     ))
     sections.append(("Accounting configuration", accounting_items))
 
-    payments_items: List[CheckItem] = []
-    payments_items.append(CheckItem(
+    pay_items: List[CheckItem] = []
+    st_pay, err_pay = status_for(["payments_getall"], "PASS")
+    s = f"Payments retrieved: {len(payments)}"
+    if err_pay:
+        s += f" | {err_pay}"
+    pay_items.append(CheckItem(
         key="Payments (last 30 days sample)",
-        status="PASS",
-        summary=f"Payments retrieved: {len(payments)}",
+        status=st_pay,
+        summary=s,
         source="Connector: Payments/GetAll (CreatedUtc 30d window)",
-        remediation="If empty, verify token scope/permissions or adjust window.",
+        remediation="If empty or failing, verify token scope/permissions and that the CreatedUtc window is supported.",
         details={"Payments": payments},
         risk="Low"
     ))
-    sections.append(("Payments", payments_items))
+    sections.append(("Payments", pay_items))
 
     inv_items: List[CheckItem] = []
+    space_err_keys = ["services_getall", "resources_getall", "resource_category_assignments_getall"]
+    space_err_keys.extend([k for k in errors.keys() if k.startswith("resource_categories_getall_")])
+
+    st_spaces, err_spaces = status_for(space_err_keys, "PASS" if resources else "WARN")
+    s = f"Spaces={len(resources)}, ResourceCategories={len(resource_categories)}, Assignments={len(rca)}"
+    if err_spaces:
+        s += f" | {err_spaces}"
     inv_items.append(CheckItem(
         key="Spaces and resource categories",
-        status="PASS" if resources else "WARN",
-        summary=f"Spaces={len(resources)}, ResourceCategories={len(resource_categories)}, Assignments={len(rca)}",
-        source="Connector: Resources/GetAll + ResourceCategories/GetAll + ResourceCategoryAssignments/GetAll",
-        remediation="Confirm each space is assigned to the correct resource category and has the expected state.",
+        status=st_spaces,
+        summary=s,
+        source="Connector: Services/GetAll + Resources/GetAll + ResourceCategories/GetAll + ResourceCategoryAssignments/GetAll",
+        remediation="Confirm each space is assigned to the correct resource category and has the expected state. If assignments cannot be retrieved, re-check token scope/endpoint validation for your tenant.",
         details={"SpacesTable": spaces_table},
         risk="High"
     ))
+
+    st_rg, err_rg = status_for(["rate_groups_getall"], "PASS" if rate_groups else "WARN")
+    s = f"RateGroups={len(rate_groups)}"
+    if err_rg:
+        s += f" | {err_rg}"
     inv_items.append(CheckItem(
         key="Rate groups",
-        status="PASS" if rate_groups else "WARN",
-        summary=f"RateGroups={len(rate_groups)}",
+        status=st_rg,
+        summary=s,
         source="Connector: RateGroups/GetAll",
         remediation="Review rate group list and activity state.",
         details={"RateGroupsTable": rate_groups_table},
         risk="Medium"
     ))
+
+    st_rates, err_rates = status_for(["rates_getall"], "PASS" if rates else "WARN")
+    s = f"Rates={len(rates)}"
+    if err_rates:
+        s += f" | {err_rates}"
     inv_items.append(CheckItem(
         key="Rates",
-        status="PASS" if rates else "WARN",
-        summary=f"Rates={len(rates)}",
+        status=st_rates,
+        summary=s,
         source="Connector: Rates/GetAll",
         remediation="Review rate list, base rate inheritance, group membership, visibility and status.",
         details={"RatesTable": rates_table},
         risk="High"
     ))
+
+    st_rest, err_rest = status_for(["restrictions_getall"], "PASS" if restrictions else "WARN")
+    s = f"Restrictions returned: {len(restrictions)}; Future-only rows: {len(restrictions_table)}"
+    if err_rest:
+        s += f" | {err_rest}"
     inv_items.append(CheckItem(
         key="Restrictions (future stays)",
-        status="PASS" if restrictions else "WARN",
-        summary=f"Restrictions returned: {len(restrictions)}; Future-only rows: {len(restrictions_table)}",
+        status=st_rest,
+        summary=s,
         source="Connector: Restrictions/GetAll",
         remediation="Review future-only restrictions for correctness of time window, rate scope, space scope and exceptions.",
         details={"RestrictionsTable": restrictions_table},
@@ -766,6 +847,13 @@ def build_pdf(report: AuditReport) -> bytes:
     def P(text: Any, style: str = "TinyX") -> Paragraph:
         return Paragraph(esc(text), styles[style])
 
+    def safe_para(text: str, style_name: str) -> Paragraph:
+        try:
+            return Paragraph(text, styles[style_name])
+        except Exception:
+            plain = text.replace("<", "&lt;").replace(">", "&gt;")
+            return Paragraph(plain, styles[style_name])
+
     def badge(status: str) -> str:
         st = (status or "").upper()
         if st == "PASS":
@@ -817,12 +905,16 @@ def build_pdf(report: AuditReport) -> bytes:
         canvas.saveState()
         y = A4[1] - 12 * mm
         if logo:
-            renderPDF.draw(logo, canvas, 16 * mm, y - (logo.height or 0))
+            try:
+                renderPDF.draw(logo, canvas, 16 * mm, y - (logo.height or 0))
+            except Exception:
+                pass
             canvas.setFont("Helvetica-Bold", 12.5)
             canvas.drawString(16 * mm + 44 * mm, y - 3 * mm, "Mews Configuration Audit Report")
         else:
             canvas.setFont("Helvetica-Bold", 12.5)
             canvas.drawString(16 * mm, y - 3 * mm, "Mews Configuration Audit Report")
+
         canvas.setFont("Helvetica", 8.5)
         canvas.drawRightString(A4[0] - 16 * mm, y - 3 * mm, f"Page {doc_.page}")
         canvas.restoreState()
@@ -865,13 +957,13 @@ def build_pdf(report: AuditReport) -> bytes:
 
         over_rows = []
         for it in items:
-            over_rows.append([P(it.key, "SmallX"), Paragraph(badge(it.status), styles["SmallX"]), P(it.risk, "SmallX"), P(it.summary, "SmallX")])
+            over_rows.append([P(it.key, "SmallX"), safe_para(badge(it.status), "SmallX"), P(it.risk, "SmallX"), P(it.summary, "SmallX")])
         story.append(make_long_table(["Check", "Status", "Risk", "Summary"], over_rows, [62*mm, 20*mm, 18*mm, 78*mm]))
         story.append(Spacer(1, 8))
 
         for it in items:
             block: List[Any] = []
-            block.append(Paragraph(f"<b>{esc(it.key)}</b> &nbsp;&nbsp; {badge(it.status)} &nbsp;&nbsp; <font color='#64748b'>Risk:</font> <b>{esc(it.risk)}</b>", styles["BodyX"]))
+            block.append(safe_para(f"<b>{esc(it.key)}</b> &nbsp;&nbsp; {badge(it.status)} &nbsp;&nbsp; <font color='#64748b'>Risk:</font> <b>{esc(it.risk)}</b>", "BodyX"))
             block.append(Paragraph(esc(it.summary or "-"), styles["BodyX"]))
             block.append(Spacer(1, 4))
 
@@ -954,7 +1046,7 @@ def build_pdf(report: AuditReport) -> bytes:
             if it.source:
                 block.append(Paragraph(f"<font color='#64748b'><b>Source:</b> {esc(it.source)}</font>", styles["TinyX"]))
             if it.remediation:
-                block.append(Paragraph(f"<b>Recommendation:</b> {esc(it.remediation)}", styles["SmallX"]))
+                block.append(safe_para(f"<b>Recommendation:</b> {esc(it.remediation)}", "SmallX"))
 
             block.append(Spacer(1, 10))
             story.append(KeepTogether(block))
