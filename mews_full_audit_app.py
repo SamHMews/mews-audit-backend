@@ -298,20 +298,37 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
                           {"EnterpriseIds": enterprises} if enterprises else {}, "Counters")
     cashiers = fetch_list("cashiers_getall", "Cashiers", "GetAll",
                           {"EnterpriseIds": enterprises} if enterprises else {}, "Cashiers")
-# Product pricing (gross/net) via Products/GetPricing (Restricted / beta).
-# NOTE: This can be slow if a property has many products. To avoid Gunicorn worker timeouts
-# on small instances, we fetch pricing concurrently with a strict time budget.
+# Product pricing (gross/net) for Product mapping.
+# Priority:
+#   1) Use Products/GetAll -> Price (if GrossValue/NetValue present) for speed.
+#   2) For products missing gross/net, attempt Products/GetPricing within a strict time budget
+#      to avoid Gunicorn worker timeouts on small instances.
 product_pricing: Dict[str, Dict[str, Optional[float]]] = {}
 pricing_errors: List[str] = []
 
-PRICING_MAX_WORKERS = int(os.getenv("PRODUCT_PRICING_MAX_WORKERS", "6"))
-PRICING_TIMEOUT_S = int(os.getenv("PRODUCT_PRICING_HTTP_TIMEOUT_SECONDS", "8"))
-PRICING_BUDGET_S = int(os.getenv("PRODUCT_PRICING_BUDGET_SECONDS", "18"))
+# Tunables (Render free tier friendly defaults)
+PRICING_MAX_WORKERS = int(os.getenv("PRODUCT_PRICING_MAX_WORKERS", "4"))
+PRICING_TIMEOUT_S = int(os.getenv("PRODUCT_PRICING_HTTP_TIMEOUT_SECONDS", "6"))
+PRICING_BUDGET_S = int(os.getenv("PRODUCT_PRICING_BUDGET_SECONDS", "8"))
 
 def _midnight_utc(dt: datetime) -> datetime:
     d = dt.astimezone(timezone.utc)
     return datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
 
+# 1) Fast path: derive from product.Price if possible
+missing_ids: List[str] = []
+for p in products:
+    if not isinstance(p, dict):
+        continue
+    pid = p.get("Id")
+    if not isinstance(pid, str) or not pid:
+        continue
+    g, n = amount_gross_net(p.get("Price"))
+    product_pricing[pid] = {"Gross": g, "Net": n}
+    if g is None or n is None:
+        missing_ids.append(pid)
+
+# 2) Slow path (budgeted): fill missing via GetPricing
 def _fetch_pricing(pid: str, first_s: str, last_same: str, last_next: str) -> Tuple[str, Optional[float], Optional[float], Optional[str]]:
     try:
         payload = {
@@ -325,20 +342,18 @@ def _fetch_pricing(pid: str, first_s: str, last_same: str, last_next: str) -> Tu
         resp = mc.get("Products", "GetPricing", payload, timeout=PRICING_TIMEOUT_S)
         base_prices = resp.get("BaseAmountPrices") if isinstance(resp, dict) else None
         if not (isinstance(base_prices, list) and base_prices):
-            # retry with next day window if API expects Last > First
             payload["LastTimeUnitStartUtc"] = last_next
             resp = mc.get("Products", "GetPricing", payload, timeout=PRICING_TIMEOUT_S)
             base_prices = resp.get("BaseAmountPrices") if isinstance(resp, dict) else None
 
         gross = net = None
         if isinstance(base_prices, list) and base_prices:
-            g, n = amount_gross_net(base_prices[0])
-            gross, net = g, n
+            gross, net = amount_gross_net(base_prices[0])
         return pid, gross, net, None
     except Exception as e:
         return pid, None, None, str(e)
 
-if products:
+if missing_ids:
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import time as _time
 
@@ -347,21 +362,21 @@ if products:
     last_same = first_s
     last_next = (first + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    product_ids = [p.get("Id") for p in products if isinstance(p, dict) and isinstance(p.get("Id"), str) and p.get("Id")]
     started = _time.time()
     completed = 0
 
     with ThreadPoolExecutor(max_workers=max(1, PRICING_MAX_WORKERS)) as ex:
-        futures = {ex.submit(_fetch_pricing, pid, first_s, last_same, last_next): pid for pid in product_ids}
+        futures = {ex.submit(_fetch_pricing, pid, first_s, last_same, last_next): pid for pid in missing_ids}
 
         try:
             for fut in as_completed(futures, timeout=max(1, PRICING_BUDGET_S)):
                 pid, gross, net, err = fut.result()
-                product_pricing[pid] = {"Gross": gross, "Net": net}
+                # Only overwrite if we actually got values
+                if gross is not None or net is not None:
+                    product_pricing[pid] = {"Gross": gross, "Net": net}
                 completed += 1
                 if err and len(pricing_errors) < 10:
                     pricing_errors.append(err)
-
                 if (_time.time() - started) >= PRICING_BUDGET_S:
                     break
         except Exception:
@@ -370,11 +385,9 @@ if products:
         for fut, pid in futures.items():
             if not fut.done():
                 fut.cancel()
-                if pid not in product_pricing:
-                    product_pricing[pid] = {"Gross": None, "Net": None}
 
-    if completed < len(product_ids):
-        pricing_errors.append(f"Pricing fetch timed out under budget: completed {completed}/{len(product_ids)} products. Increase PRODUCT_PRICING_BUDGET_SECONDS or reduce PRODUCT_PRICING_MAX_WORKERS.")
+    if completed < len(missing_ids):
+        pricing_errors.append(f"Products/GetPricing budget reached: completed {completed}/{len(missing_ids)} missing-pricing products.")
 
     if pricing_errors:
         errors["product_pricing_getpricing"] = " | ".join(pricing_errors)
@@ -1146,12 +1159,12 @@ def build_pdf(report: AuditReport) -> bytes:
         right_x = A4[0] - 16 * mm
 
         # Target logo box (approx red box): 30mm wide x 10mm high
-        target_w = 28 * mm
-        target_h = 5.2 * mm
+        target_w = 30 * mm
+        target_h = 6.0 * mm
 
         x_logo = right_x - target_w
         title_y = top_y - 3 * mm
-        y_logo = title_y - 2.2 * mm
+        y_logo = title_y - 0.6 * mm
 
         if logo:
             try:
