@@ -1,11 +1,9 @@
 # =========================================================
-# mews_full_audit_app.py — Full replacement
+# mews_full_audit_app.py — Full replacement (v3)
 # Start command: gunicorn mews_full_audit_app:app
 # =========================================================
 
 import os
-import re
-import json
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -130,14 +128,12 @@ class MewsConnector:
 
             if not resp.ok:
                 raise RuntimeError(f"HTTP {resp.status_code} for {path}: {data}")
-
             if not isinstance(data, dict):
                 raise RuntimeError(f"Unexpected JSON shape for {path}: {type(data)}")
-
             return data
         except Exception as e:
             dt = int((time.time() - t0) * 1000)
-            if resp is None:  # network/timeout etc
+            if resp is None:
                 self.calls.append(ApiCall(operation=path, ok=False, status_code=None, duration_ms=dt, error=str(e)))
             raise
 
@@ -183,9 +179,7 @@ class MewsConnector:
 
 
 # =========================
-# DATA COLLECTION
-# =========================
-# FIX: ResourceCategories/GetAll and ResourceCategoryAssignments/GetAll expect ServiceIds.
+# DATA COLLECTION (v3 fix)
 # =========================
 
 def collect_data(base_url: str, client_token: str, access_token: str, client_name: str = DEFAULT_CLIENT_NAME) -> Dict[str, Any]:
@@ -199,27 +193,38 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
     services = mc.paged_get_all("Services", "GetAll", {"EnterpriseIds": enterprises} if enterprises else {}, "Services")
     service_ids = [s.get("Id") for s in services if isinstance(s, dict) and s.get("Id")]
 
-    def service_payload(extra: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-        if not service_ids:
-            return None
-        p = {"ServiceIds": service_ids}
-        if extra:
-            p.update(extra)
-        return p
+    # Service-scoped endpoints
+    if service_ids:
+        rate_groups = mc.paged_get_all("RateGroups", "GetAll", {"ServiceIds": service_ids}, "RateGroups")
+        rates = mc.paged_get_all("Rates", "GetAll", {"ServiceIds": service_ids}, "Rates")
+        products = mc.paged_get_all("Products", "GetAll", {"ServiceIds": service_ids}, "Products")
+        restrictions = mc.paged_get_all("Restrictions", "GetAll", {"ServiceIds": service_ids}, "Restrictions")
+        resource_categories = mc.paged_get_all("ResourceCategories", "GetAll", {"ServiceIds": service_ids}, "ResourceCategories")
+    else:
+        rate_groups, rates, products, restrictions, resource_categories = [], [], [], [], []
 
-    # Service-scoped
-    rate_groups = mc.paged_get_all("RateGroups", "GetAll", service_payload() or {"ServiceIds": []}, "RateGroups") if service_ids else []
-    rates = mc.paged_get_all("Rates", "GetAll", service_payload() or {"ServiceIds": []}, "Rates") if service_ids else []
-    products = mc.paged_get_all("Products", "GetAll", service_payload() or {"ServiceIds": []}, "Products") if service_ids else []
-    restrictions = mc.paged_get_all("Restrictions", "GetAll", service_payload() or {"ServiceIds": []}, "Restrictions") if service_ids else []
-
-    # Enterprise-scoped
+    # Enterprise-scoped endpoints
     accounting_categories = mc.paged_get_all("AccountingCategories", "GetAll", {"EnterpriseIds": enterprises} if enterprises else {}, "AccountingCategories")
     resources = mc.paged_get_all("Resources", "GetAll", {"EnterpriseIds": enterprises} if enterprises else {}, "Resources")
 
-    # ✅ FIXED: Resource categories + assignments must use ServiceIds
-    resource_categories = mc.paged_get_all("ResourceCategories", "GetAll", service_payload() or {"ServiceIds": []}, "ResourceCategories") if service_ids else []
-    resource_category_assignments = mc.paged_get_all("ResourceCategoryAssignments", "GetAll", service_payload() or {"ServiceIds": []}, "ResourceCategoryAssignments") if service_ids else []
+    # 🔧 Tenant-specific validation:
+    # Your tenant returns "Invalid ResourceCategoryIds" if we call Assignments without ResourceCategoryIds (or with empty).
+    # So: call Assignments with ResourceCategoryIds derived from ResourceCategories.
+    resource_category_assignments: List[Dict[str, Any]] = []
+    try:
+        rc_ids = [c.get("Id") for c in resource_categories if isinstance(c, dict) and c.get("Id")]
+        if rc_ids:
+            resource_category_assignments = mc.paged_get_all(
+                "ResourceCategoryAssignments",
+                "GetAll",
+                {"ResourceCategoryIds": rc_ids},
+                "ResourceCategoryAssignments"
+            )
+        else:
+            resource_category_assignments = []
+    except Exception:
+        # Do not fail the whole audit on this endpoint
+        resource_category_assignments = []
 
     # Payments window (last 30 days)
     payments: List[Dict[str, Any]] = []
@@ -244,7 +249,6 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
     except Exception:
         cancellation_policies = []
 
-    # Optional
     rules: List[Dict[str, Any]] = []
     try:
         if service_ids:
@@ -548,7 +552,6 @@ def build_restrictions_table(restrictions: List[Dict[str, Any]],
             continue
 
         start = parse_utc(cond.get("StartUtc"))
-        # Only future stays (if StartUtc missing -> include, and show None)
         if start and start <= now:
             continue
 
@@ -562,8 +565,8 @@ def build_restrictions_table(restrictions: List[Dict[str, Any]],
         if cond.get("RateGroupId"):
             g = rg_by_id.get(cond.get("RateGroupId"))
             rate_bits.append("Group: " + (pick_name(g) if g else ""))
+        rates_scope = "; ".join([b for b in rate_bits if b.strip()]) or "All rates"
 
-        rates_scope = "; ".join([b for b in rate_bits if b.strip() and not b.strip().endswith(":")]) or ("All rates" if not rate_bits else "; ".join(rate_bits))
         spaces_scope = "All spaces"
         if cond.get("ResourceCategoryId"):
             c = cat_by_id.get(cond.get("ResourceCategoryId"))
@@ -571,7 +574,7 @@ def build_restrictions_table(restrictions: List[Dict[str, Any]],
 
         rows.append({
             "Time": summarise_restriction_time(cond),
-            "Rates": rates_scope or "All rates",
+            "Rates": rates_scope,
             "Spaces": spaces_scope,
             "Exceptions": summarise_restriction_exceptions(r.get("Exceptions")),
         })
@@ -580,11 +583,7 @@ def build_restrictions_table(restrictions: List[Dict[str, Any]],
     return rows
 
 
-# =========================
-# BUILD REPORT
-# =========================
-
-def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> AuditReport:
+def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "AuditReport":
     cfg = data.get("cfg", {})
     services = data.get("services", [])
     rate_groups = data.get("rate_groups", [])
@@ -614,7 +613,6 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> Audit
 
     sections: List[Tuple[str, List[CheckItem]]] = []
 
-    # Legal baseline (kept)
     legal_items: List[CheckItem] = []
     tz = (cfg.get("Enterprise") or {}).get("TimeZone") if isinstance(cfg, dict) else None
     currency = (cfg.get("Enterprise") or {}).get("DefaultCurrency") if isinstance(cfg, dict) else None
@@ -623,7 +621,6 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> Audit
     legal_items.append(CheckItem("Tax environment + VAT/GST rates", "PASS" if (tax_envs or taxations) else "WARN", f"TaxEnvironments={len(tax_envs)}, Taxations={len(taxations)}", "Connector: TaxEnvironments/GetAll + Taxations/GetAll", "Validate tax environment selection and tax codes match jurisdiction.", {"TaxEnvironments": tax_envs[:200], "Taxations": taxations[:500]}, "Medium"))
     sections.append(("Legal & property baseline", legal_items))
 
-    # Accounting configuration (your requested tables)
     accounting_items: List[CheckItem] = []
     accounting_items.append(CheckItem(
         key="Accounting categories (list)",
@@ -654,7 +651,6 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> Audit
     ))
     sections.append(("Accounting configuration", accounting_items))
 
-    # Payments (unchanged)
     payments_items: List[CheckItem] = []
     payments_items.append(CheckItem(
         key="Payments (last 30 days sample)",
@@ -667,7 +663,6 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> Audit
     ))
     sections.append(("Payments", payments_items))
 
-    # Spaces, rates & restrictions
     inv_items: List[CheckItem] = []
     inv_items.append(CheckItem(
         key="Spaces and resource categories",
@@ -707,7 +702,7 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> Audit
     ))
     sections.append(("Spaces, rates & restrictions", inv_items))
 
-    calls = []
+    calls: List[ApiCall] = []
     for c in data.get("api_calls", []):
         if isinstance(c, dict):
             calls.append(ApiCall(
@@ -728,10 +723,6 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> Audit
         sections=sections,
     )
 
-
-# =========================
-# PDF GENERATION
-# =========================
 
 def fetch_logo():
     if not LOGO_URL:
@@ -794,7 +785,6 @@ def build_pdf(report: AuditReport) -> bytes:
 
         t = LongTable(data, colWidths=col_widths, repeatRows=1)
 
-        # IDs in smaller font (your rule)
         id_cols = set()
         for i, h in enumerate(header):
             hl = (h or "").lower()
@@ -833,7 +823,6 @@ def build_pdf(report: AuditReport) -> bytes:
         else:
             canvas.setFont("Helvetica-Bold", 12.5)
             canvas.drawString(16 * mm, y - 3 * mm, "Mews Configuration Audit Report")
-
         canvas.setFont("Helvetica", 8.5)
         canvas.drawRightString(A4[0] - 16 * mm, y - 3 * mm, f"Page {doc_.page}")
         canvas.restoreState()
@@ -965,7 +954,7 @@ def build_pdf(report: AuditReport) -> bytes:
             if it.source:
                 block.append(Paragraph(f"<font color='#64748b'><b>Source:</b> {esc(it.source)}</font>", styles["TinyX"]))
             if it.remediation:
-                block.append(Paragraph(f"<b>Recommendation:</b> {esc(it.remediation)}", styles["SmallX"]))
+                block.append(Paragraph(f"<b>Recommendation:</b> {esc(it.remediation)}</b>", styles["SmallX"]))
 
             block.append(Spacer(1, 10))
             story.append(KeepTogether(block))
@@ -990,10 +979,6 @@ def build_pdf(report: AuditReport) -> bytes:
         raise RuntimeError(f"Generated PDF too large ({len(pdf)/(1024*1024):.1f}MB) for environment limit ({MAX_PDF_MB}MB).")
     return pdf
 
-
-# =========================
-# FLASK APP
-# =========================
 
 HTML = """<!doctype html>
 <html lang="en">
