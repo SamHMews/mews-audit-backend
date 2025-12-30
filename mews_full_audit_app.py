@@ -1,15 +1,14 @@
 # =========================================================
-# mews_full_audit_app.py — Full replacement (v11)
+# mews_full_audit_app.py — Full replacement (v12)
 # Start command: gunicorn mews_full_audit_app:app
 # =========================================================
 #
-# v10 changes (since v7/v8):
-# - Product mapping now uses Gross/Net/VAT columns (VAT = Gross - Net)
-#   - Fast path: use Products/GetAll -> Price (if GrossValue/NetValue are present)
-#   - Fallback: Products/GetPricing for products missing gross/net, but budgeted+concurrent to avoid Gunicorn timeouts
-# - Adds requests.Session pooling and per-call timeout support in MewsConnector
-# - NEEDS_INPUT persists and flags pricing sections when GetPricing is restricted or budgeted out
-# - Logo resized/aligned to sit top-right on the same line as the title
+# v6 changes (per Sam's requirements):
+# - NEEDS_INPUT: Any section where required API calls failed is marked NEEDS_INPUT (and error surfaced)
+# - Product mapping Tax %: uses configured taxation rate (via Taxations/GetAll) when available
+# - Logo: defaults to Mews SVG logo URL if LOGO_URL env var is not set
+# - Spaces & resource categories: fetch ResourceCategories per ServiceId; then fetch Assignments using ResourceCategoryIds
+#   (avoids tenant validation errors and prevents "UNASSIGNED everywhere" when assignments are available)
 #
 # =========================================================
 
@@ -22,9 +21,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-BUILD_TAG = "v11"
-
+BUILD_TAG = "v12"
 ENABLE_PRODUCT_GETPRICING = os.getenv("ENABLE_PRODUCT_GETPRICING", "0") == "1"
+
 from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
 
@@ -234,6 +233,148 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
         rate_groups = fetch_list("rate_groups_getall", "RateGroups", "GetAll", {"ServiceIds": service_ids}, "RateGroups")
         rates = fetch_list("rates_getall", "Rates", "GetAll", {"ServiceIds": service_ids}, "Rates")
         products = fetch_list("products_getall", "Products", "GetAll", {"ServiceIds": service_ids}, "Products")
+
+        # Product pricing for Product mapping (Gross/Net/VAT).
+
+        # Default (Render free tier): avoid per-product Products/GetPricing calls (can time out).
+
+        # Enable via env var ENABLE_PRODUCT_GETPRICING=1.
+
+        product_pricing: Dict[str, Dict[str, Optional[float]]] = {}
+
+        pricing_errors: List[str] = []
+
+
+        missing_ids: List[str] = []
+
+        for p in products:
+
+            if not isinstance(p, dict):
+
+                continue
+
+            pid = p.get("Id")
+
+            if not isinstance(pid, str) or not pid:
+
+                continue
+
+            g, n = amount_gross_net(p.get("Price"))
+
+            product_pricing[pid] = {"Gross": g, "Net": n}
+
+            if g is None or n is None:
+
+                missing_ids.append(pid)
+
+
+        if missing_ids and not ENABLE_PRODUCT_GETPRICING:
+
+            errors["product_pricing_getpricing"] = (
+
+                f"Skipped Products/GetPricing for {len(missing_ids)} products (ENABLE_PRODUCT_GETPRICING=0). "
+
+                "Enable it to populate Gross/Net/VAT where Products/GetAll does not include gross/net."
+
+            )
+
+
+        if missing_ids and ENABLE_PRODUCT_GETPRICING:
+
+            PRICING_MAX_WORKERS = int(os.getenv("PRODUCT_PRICING_MAX_WORKERS", "4"))
+
+            PRICING_TIMEOUT_S = int(os.getenv("PRODUCT_PRICING_HTTP_TIMEOUT_SECONDS", "6"))
+
+            PRICING_BUDGET_S = int(os.getenv("PRODUCT_PRICING_BUDGET_SECONDS", "10"))
+
+
+            def _midnight_utc(dt: datetime) -> datetime:
+
+                d = dt.astimezone(timezone.utc)
+
+                return datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
+
+
+            def _fetch_pricing(pid: str, first_s: str, last_same: str, last_next: str) -> Tuple[str, Optional[float], Optional[float], Optional[str]]:
+
+                try:
+
+                    payload = {"ProductId": pid, "FirstTimeUnitStartUtc": first_s, "LastTimeUnitStartUtc": last_same}
+
+                    if enterprises:
+
+                        payload["EnterpriseIds"] = enterprises
+
+                    resp = mc.get("Products", "GetPricing", payload, timeout=PRICING_TIMEOUT_S)
+
+                    base_prices = resp.get("BaseAmountPrices") if isinstance(resp, dict) else None
+
+                    if not (isinstance(base_prices, list) and base_prices):
+
+                        payload["LastTimeUnitStartUtc"] = last_next
+
+                        resp = mc.get("Products", "GetPricing", payload, timeout=PRICING_TIMEOUT_S)
+
+                        base_prices = resp.get("BaseAmountPrices") if isinstance(resp, dict) else None
+
+                    gross = net = None
+
+                    if isinstance(base_prices, list) and base_prices:
+
+                        gross, net = amount_gross_net(base_prices[0])
+
+                    return pid, gross, net, None
+
+                except Exception as e:
+
+                    return pid, None, None, str(e)
+
+
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            start_t = time.time()
+
+            first = _midnight_utc(utc_now())
+
+            first_s = first.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            last_same = first_s
+
+            last_next = (first + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+            done = 0
+
+            with ThreadPoolExecutor(max_workers=max(1, PRICING_MAX_WORKERS)) as ex:
+
+                futures = [ex.submit(_fetch_pricing, pid, first_s, last_same, last_next) for pid in missing_ids]
+
+                for fut in as_completed(futures, timeout=max(1, PRICING_BUDGET_S)):
+
+                    pid, gross, net, err = fut.result()
+
+                    if gross is not None or net is not None:
+
+                        product_pricing[pid] = {"Gross": gross, "Net": net}
+
+                    done += 1
+
+                    if err and len(pricing_errors) < 10:
+
+                        pricing_errors.append(err)
+
+                    if (time.time() - start_t) >= PRICING_BUDGET_S:
+
+                        break
+
+
+            if done < len(missing_ids):
+
+                pricing_errors.append(f"Products/GetPricing budget reached: completed {done}/{len(missing_ids)} products.")
+
+            if pricing_errors:
+
+                errors["product_pricing_getpricing"] = " | ".join(pricing_errors)
         restrictions = fetch_list("restrictions_getall", "Restrictions", "GetAll", {"ServiceIds": service_ids}, "Restrictions")
     else:
         rate_groups, rates, products, restrictions = [], [], [], []
@@ -303,100 +444,60 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
                           {"EnterpriseIds": enterprises} if enterprises else {}, "Counters")
     cashiers = fetch_list("cashiers_getall", "Cashiers", "GetAll",
                           {"EnterpriseIds": enterprises} if enterprises else {}, "Cashiers")
-# Product pricing (gross/net) for Product mapping.
-# Priority:
-#   1) Use Products/GetAll -> Price (if GrossValue/NetValue present) for speed.
-#   2) For products missing gross/net, attempt Products/GetPricing within a strict time budget
-#      to avoid Gunicorn worker timeouts on small instances.
-product_pricing: Dict[str, Dict[str, Optional[float]]] = {}
-pricing_errors: List[str] = []
 
-# Tunables (Render free tier friendly defaults)
-PRICING_MAX_WORKERS = int(os.getenv("PRODUCT_PRICING_MAX_WORKERS", "4"))
-PRICING_TIMEOUT_S = int(os.getenv("PRODUCT_PRICING_HTTP_TIMEOUT_SECONDS", "6"))
-PRICING_BUDGET_S = int(os.getenv("PRODUCT_PRICING_BUDGET_SECONDS", "8"))
+    # Product pricing (gross/net) via Products/GetPricing (Restricted / beta).
+    # We request 1 day window at today's 00:00Z to get a single time unit price.
+    product_pricing: Dict[str, Dict[str, Optional[float]]] = {}
+    pricing_errors: List[str] = []
 
-def _midnight_utc(dt: datetime) -> datetime:
-    d = dt.astimezone(timezone.utc)
-    return datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
+    def _midnight_utc(dt: datetime) -> datetime:
+        d = dt.astimezone(timezone.utc)
+        return datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
 
-# 1) Fast path: derive from product.Price if possible
-missing_ids: List[str] = []
-for p in products:
-    if not isinstance(p, dict):
-        continue
-    pid = p.get("Id")
-    if not isinstance(pid, str) or not pid:
-        continue
-    g, n = amount_gross_net(p.get("Price"))
-    product_pricing[pid] = {"Gross": g, "Net": n}
-    if g is None or n is None:
-        missing_ids.append(pid)
+    if products:
+        first = _midnight_utc(utc_now())
+        first_s = first.strftime("%Y-%m-%dT%H:%M:%SZ")
+        # default "one time unit" attempt: last == first
+        last_same = first_s
+        # fallback: next day
+        last_next = (first + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-# 2) Slow path (budgeted): fill missing via GetPricing
-def _fetch_pricing(pid: str, first_s: str, last_same: str, last_next: str) -> Tuple[str, Optional[float], Optional[float], Optional[str]]:
-    try:
-        payload = {
-            "ProductId": pid,
-            "FirstTimeUnitStartUtc": first_s,
-            "LastTimeUnitStartUtc": last_same,
-        }
-        if enterprises:
-            payload["EnterpriseIds"] = enterprises
+        for p in products:
+            pid = p.get("Id") if isinstance(p, dict) else None
+            if not isinstance(pid, str) or not pid:
+                continue
+            try:
+                payload = {
+                    "ProductId": pid,
+                    "FirstTimeUnitStartUtc": first_s,
+                    "LastTimeUnitStartUtc": last_same,
+                }
+                if enterprises:
+                    payload["EnterpriseIds"] = enterprises
 
-        resp = mc.get("Products", "GetPricing", payload, timeout=PRICING_TIMEOUT_S)
-        base_prices = resp.get("BaseAmountPrices") if isinstance(resp, dict) else None
-        if not (isinstance(base_prices, list) and base_prices):
-            payload["LastTimeUnitStartUtc"] = last_next
-            resp = mc.get("Products", "GetPricing", payload, timeout=PRICING_TIMEOUT_S)
-            base_prices = resp.get("BaseAmountPrices") if isinstance(resp, dict) else None
+                resp = mc.get("Products", "GetPricing", payload)
+                base_prices = resp.get("BaseAmountPrices") if isinstance(resp, dict) else None
+                if not (isinstance(base_prices, list) and base_prices):
+                    # retry with next day window if API expects Last > First
+                    payload["LastTimeUnitStartUtc"] = last_next
+                    resp = mc.get("Products", "GetPricing", payload)
+                    base_prices = resp.get("BaseAmountPrices") if isinstance(resp, dict) else None
 
-        gross = net = None
-        if isinstance(base_prices, list) and base_prices:
-            gross, net = amount_gross_net(base_prices[0])
-        return pid, gross, net, None
-    except Exception as e:
-        return pid, None, None, str(e)
+                gross = net = None
+                if isinstance(base_prices, list) and base_prices:
+                    g, n = amount_gross_net(base_prices[0])
+                    gross, net = g, n
 
-if missing_ids:
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    import time as _time
+                product_pricing[pid] = {"Gross": gross, "Net": net}
+            except Exception as e:
+                product_pricing[pid] = {"Gross": None, "Net": None}
+                # Keep a short error list to mark NEEDS_INPUT without bloating the PDF.
+                msg = str(e)
+                if len(pricing_errors) < 10:
+                    pricing_errors.append(msg)
 
-    first = _midnight_utc(utc_now())
-    first_s = first.strftime("%Y-%m-%dT%H:%M:%SZ")
-    last_same = first_s
-    last_next = (first + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    started = _time.time()
-    completed = 0
-
-    with ThreadPoolExecutor(max_workers=max(1, PRICING_MAX_WORKERS)) as ex:
-        futures = {ex.submit(_fetch_pricing, pid, first_s, last_same, last_next): pid for pid in missing_ids}
-
-        try:
-            for fut in as_completed(futures, timeout=max(1, PRICING_BUDGET_S)):
-                pid, gross, net, err = fut.result()
-                # Only overwrite if we actually got values
-                if gross is not None or net is not None:
-                    product_pricing[pid] = {"Gross": gross, "Net": net}
-                completed += 1
-                if err and len(pricing_errors) < 10:
-                    pricing_errors.append(err)
-                if (_time.time() - started) >= PRICING_BUDGET_S:
-                    break
-        except Exception:
-            pass
-
-        for fut, pid in futures.items():
-            if not fut.done():
-                fut.cancel()
-
-    if completed < len(missing_ids):
-        pricing_errors.append(f"Products/GetPricing budget reached: completed {completed}/{len(missing_ids)} missing-pricing products.")
-
-    if pricing_errors:
-        errors["product_pricing_getpricing"] = " | ".join(pricing_errors)
-
+        if pricing_errors:
+            errors["product_pricing_getpricing"] = " | ".join(pricing_errors)
 
     return {
         "cfg": cfg,
@@ -644,21 +745,18 @@ def build_product_mapping_table(products: List[Dict[str, Any]],
     cat_by_id = {c.get("Id"): c for c in accounting_categories if isinstance(c, dict) and c.get("Id")}
     rows: List[Dict[str, Any]] = []
 
+    def fmt(x: Optional[float]) -> str:
+        return "" if x is None else f"{x:.2f}"
+
     for p in products:
         if not isinstance(p, dict):
             continue
-        cat = cat_by_id.get(p.get("AccountingCategoryId"))
         pid = p.get("Id")
         pricing = product_pricing.get(pid, {}) if isinstance(pid, str) else {}
         gross = pricing.get("Gross")
         net = pricing.get("Net")
-        vat = None
-        if gross is not None and net is not None:
-            vat = gross - net
-
-        def fmt(x: Optional[float]) -> str:
-            return "" if x is None else f"{x:.2f}"
-
+        vat = (gross - net) if (gross is not None and net is not None) else None
+        cat = cat_by_id.get(p.get("AccountingCategoryId"))
         rows.append({
             "Product": pick_name(p) or "",
             "Accounting category": (cat.get("Name") if isinstance(cat, dict) else "UNMAPPED") or "UNMAPPED",
@@ -1096,7 +1194,7 @@ def build_pdf(report: AuditReport) -> bytes:
         rightMargin=16 * mm,
         topMargin=18 * mm,
         bottomMargin=16 * mm,
-        title="Mews Configuration Audit Report",
+        title=f"Mews Configuration Audit Report ({BUILD_TAG})",
         author="Mews Audit Tool",
     )
 
@@ -1164,12 +1262,12 @@ def build_pdf(report: AuditReport) -> bytes:
         right_x = A4[0] - 16 * mm
 
         # Target logo box (approx red box): 30mm wide x 10mm high
-        target_w = 30 * mm
-        target_h = 6.0 * mm
+        target_w = 28 * mm
+        target_h = 5.2 * mm
 
         x_logo = right_x - target_w
         title_y = top_y - 3 * mm
-        y_logo = title_y - 0.6 * mm
+        y_logo = title_y - 2.2 * mm
 
         if logo:
             try:
@@ -1187,7 +1285,7 @@ def build_pdf(report: AuditReport) -> bytes:
 
         # Title on the left
         canvas.setFont("Helvetica-Bold", 12.5)
-        canvas.drawString(16 * mm, top_y - 3 * mm, f"Mews Configuration Audit Report  ({BUILD_TAG})")
+        canvas.drawString(16 * mm, top_y - 3 * mm, f"Mews Configuration Audit Report ({BUILD_TAG})")
 
         # Page number to the left of the logo box (so it never overlaps)
         canvas.setFont("Helvetica", 8.5)
@@ -1198,7 +1296,7 @@ def build_pdf(report: AuditReport) -> bytes:
     story: List[Any] = []
 
     story.append(Spacer(1, 16))
-    story.append(Paragraph("Mews Configuration Audit Report", styles["TitleX"]))
+    story.append(Paragraph(f"Mews Configuration Audit Report ({BUILD_TAG})", styles["TitleX"]))
     story.append(Paragraph(
         f"<b>Enterprise:</b> {esc(report.enterprise_name or 'Unknown')} &nbsp;&nbsp; "
         f"<b>EnterpriseId:</b> {esc(report.enterprise_id or 'Unknown')}<br/>"
