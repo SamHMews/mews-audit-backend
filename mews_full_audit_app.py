@@ -1067,7 +1067,7 @@ def build_pdf(report: AuditReport) -> bytes:
 
         for i in range(1, len(data)):
             if i % 2 == 0:
-                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#EFEFFF"))
+                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#896886"))
 
         t.setStyle(ts)
         return t
