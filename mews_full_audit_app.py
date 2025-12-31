@@ -1001,7 +1001,7 @@ def build_pdf(report: AuditReport) -> bytes:
         ts = TableStyle([
             ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
             ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2ff")),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F7BCF1")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
             ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cbd5e1")),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -1015,7 +1015,7 @@ def build_pdf(report: AuditReport) -> bytes:
 
         for i in range(1, len(data)):
             if i % 2 == 0:
-                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#f8fafc"))
+                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#EFEFFF"))
 
         t.setStyle(ts)
         return t
