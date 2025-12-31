@@ -30,6 +30,8 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether
 from reportlab.platypus.tables import LongTable, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 from svglib.svglib import svg2rlg
 from reportlab.graphics import renderPDF
@@ -943,12 +945,62 @@ def build_pdf(report: AuditReport) -> bytes:
     from io import BytesIO
 
     buf = BytesIO()
+
+    # --- Font registration (Manrope for headings, Inter for body) ---
+    FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
+    pdfmetrics.registerFont(TTFont("Inter", os.path.join(FONT_DIR, "Inter-Regular.ttf")))
+    pdfmetrics.registerFont(TTFont("Manrope", os.path.join(FONT_DIR, "Manrope-Regular.ttf")))
+    pdfmetrics.registerFont(TTFont("Manrope-Semibold", os.path.join(FONT_DIR, "Manrope-SemiBold.ttf")))
+
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="TitleX", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=20, leading=24, alignment=TA_CENTER, spaceAfter=10))
-    styles.add(ParagraphStyle(name="H1X", parent=styles["Heading1"], fontSize=15, leading=18, spaceBefore=10, spaceAfter=6))
-    styles.add(ParagraphStyle(name="BodyX", parent=styles["BodyText"], fontSize=9.6, leading=12))
-    styles.add(ParagraphStyle(name="SmallX", parent=styles["BodyText"], fontSize=8.6, leading=11))
-    styles.add(ParagraphStyle(name="TinyX", parent=styles["BodyText"], fontSize=8.1, leading=10))
+    styles.add(ParagraphStyle(
+        name="TitleX",
+        parent=styles["Title"],
+        fontName="Manrope-Semibold",
+        fontSize=20,
+        leading=24,
+        alignment=TA_CENTER,
+        spaceAfter=10,
+        textColor=colors.HexColor("#1C1D24"),
+    ))
+
+    styles.add(ParagraphStyle(
+        name="H1X",
+        parent=styles["Heading1"],
+        fontName="Manrope-Semibold",
+        fontSize=15,
+        leading=18,
+        spaceBefore=10,
+        spaceAfter=6,
+        textColor=colors.HexColor("#1C1D24"),
+    ))
+
+    styles.add(ParagraphStyle(
+        name="BodyX",
+        parent=styles["BodyText"],
+        fontName="Inter",
+        fontSize=9.6,
+        leading=12,
+        textColor=colors.HexColor("#1C1D24"),
+    ))
+
+    styles.add(ParagraphStyle(
+        name="SmallX",
+        parent=styles["BodyText"],
+        fontName="Inter",
+        fontSize=8.6,
+        leading=11,
+        textColor=colors.HexColor("#1C1D24"),
+    ))
+
+    styles.add(ParagraphStyle(
+        name="TinyX",
+        parent=styles["BodyText"],
+        fontName="Inter",
+        fontSize=8.1,
+        leading=10,
+        textColor=colors.HexColor("#1C1D24"),
+    ))
 
     logo = fetch_logo()
 
@@ -999,10 +1051,10 @@ def build_pdf(report: AuditReport) -> bytes:
                 id_cols.add(i)
 
         ts = TableStyle([
-            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+            ("FONTNAME", (0, 0), (-1, -1), "Inter"),
             ("FONTSIZE", (0, 0), (-1, -1), 8),
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F7BCF1")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1C1D24")),
             ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cbd5e1")),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("LEFTPADDING", (0, 0), (-1, -1), 4),
@@ -1026,15 +1078,15 @@ def build_pdf(report: AuditReport) -> bytes:
         top_y = A4[1] - 10 * mm  # near top margin
         right_x = A4[0] - 16 * mm
 
-        # Logo: same visual height as the title line, top-right on the SAME line
-        # 12.5pt title text ~= 4.4mm. Give the logo a ~4.8mm height to match.
-        target_h = 4.8 * mm
-        target_w = 18 * mm  # keep compact so it doesn't collide with the page number
+        # Logo: top-right, aligned with OR slightly above the title line
+        # Keep it compact so it never collides with the page number.
+        target_h = 6.2 * mm
+        target_w = 24 * mm
 
         x_logo = right_x - target_w
-        # drawString uses a baseline; align logo vertically with the title's text box.
+        # Title baseline (left). Place logo on the same line, nudged slightly upward.
         title_y = top_y - 3 * mm
-        y_logo = title_y - (target_h * 0.85)
+        y_logo = title_y + 1.2 * mm
 
         if logo:
             try:
@@ -1051,11 +1103,11 @@ def build_pdf(report: AuditReport) -> bytes:
                 pass
 
         # Title on the left
-        canvas.setFont("Helvetica-Bold", 12.5)
+        canvas.setFont("Manrope-Semibold", 12.5)
         canvas.drawString(16 * mm, title_y, "Mews Configuration Audit Report")
 
         # Page number to the left of the logo box (so it never overlaps)
-        canvas.setFont("Helvetica", 8.5)
+        canvas.setFont("Inter", 8.5)
         canvas.drawRightString(x_logo - 3 * mm, title_y, f"Page {doc_.page}")
 
         canvas.restoreState()
