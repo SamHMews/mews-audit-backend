@@ -1,1349 +1,834 @@
-# =========================================================
-# mews_full_audit_app.py — Full replacement (v7.1)
-# Start command: gunicorn mews_full_audit_app:app
-# =========================================================
-#
-# v6 changes (per Sam's requirements):
-# - NEEDS_INPUT: Any section where required API calls failed is marked NEEDS_INPUT (and error surfaced)
-# - Product mapping Tax %: uses configured taxation rate (via Taxations/GetAll) when available
-# - Logo: defaults to Mews SVG logo URL if LOGO_URL env var is not set
-# - Spaces & resource categories: fetch ResourceCategories per ServiceId; then fetch Assignments using ResourceCategoryIds
-#   (avoids tenant validation errors and prevents "UNASSIGNED everywhere" when assignments are available)
-#
-# =========================================================
+<!DOCTYPE html>
+<html lang="en" class="no-js">
+<head>
+  <!-- Sam & Georgia — Gozo Wedding (single-file site, updated: Google Maps + goldfish + RSVP menu) -->
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#F9F6F0" />
+  <title>Sam &amp; Georgia — Gozo Wedding</title>
+  <meta name="description" content="Sam & Georgia's Mediterranean wedding in Gozo · dates, travel, venues and RSVP — warm, coastal and timeless." />
 
-import os
-import time
-import traceback
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+  <!-- Social sharing -->
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="Sam &amp; Georgia — Gozo Wedding" />
+  <meta property="og:description" content="Join us in Gozo · dates, travel, venue & RSVP." />
+  <meta property="og:image" content="https://upload.wikimedia.org/wikipedia/commons/e/e8/Ramla_Bay.jpg" />
+  <meta name="twitter:card" content="summary_large_image" />
 
-import requests
-from flask import Flask, request, jsonify, send_file, render_template_string
-from flask_cors import CORS
+  <link rel="canonical" href="https://example.com/" />
 
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
-from reportlab.lib.enums import TA_CENTER
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether
-from reportlab.platypus.tables import LongTable, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
+  <!-- Favicon: cartoon sun (SVG) -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='14' fill='%23E6B655'/%3E%3Cg stroke='%23E6B655' stroke-width='4'%3E%3Cline x1='32' y1='4' x2='32' y2='16'/%3E%3Cline x1='32' y1='48' x2='32' y2='60'/%3E%3Cline x1='4' y1='32' x2='16' y2='32'/%3E%3Cline x1='48' y1='32' x2='60' y2='32'/%3E%3Cline x1='12' y1='12' x2='20' y2='20'/%3E%3Cline x1='44' y1='44' x2='52' y2='52'/%3E%3Cline x1='12' y1='52' x2='20' y2='44'/%3E%3Cline x1='44' y1='20' x2='52' y2='12'/%3E%3C/g%3E%3C/svg%3E" />
 
-from svglib.svglib import svg2rlg
-from reportlab.graphics import renderPDF
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Parisienne&family=Raleway:wght@300;400;500;600&display=swap" rel="stylesheet">
 
-
-# =========================
-# CONFIG
-# =========================
-
-DEFAULT_API_BASE = os.getenv("MEWS_API_BASE_URL", "https://api.mews-demo.com/api/connector/v1").rstrip("/")
-DEFAULT_CLIENT_NAME = os.getenv("MEWS_CLIENT_NAME", "Mews Audit Tool 1.0.0")
-DEFAULT_TIMEOUT = int(os.getenv("MEWS_HTTP_TIMEOUT_SECONDS", "30"))
-MAX_PDF_MB = int(os.getenv("MAX_PDF_MB", "18"))
-
-# Default to Mews logo if env var isn't set
-LOGO_URL = (os.getenv("LOGO_URL", "").strip()
-            or "https://www.mews.com/hubfs/_Project_Phoenix/images/logo/Mews%20Logo.svg")
-
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def esc(s: Any) -> str:
-    if s is None:
-        return ""
-    s = str(s)
-    return (
-        s.replace("&", "&amp;")
-         .replace("<", "&lt;")
-         .replace(">", "&gt;")
-         .replace('"', "&quot;")
-         .replace("'", "&#39;")
-    )
-
-
-def pick_name(obj: Any) -> str:
-    if not isinstance(obj, dict):
-        return ""
-    if obj.get("Name"):
-        return str(obj.get("Name"))
-    if obj.get("ShortName"):
-        return str(obj.get("ShortName"))
-    names = obj.get("Names")
-    if isinstance(names, dict):
-        for _, v in names.items():
-            if v:
-                return str(v)
-    return ""
-
-
-def chunk_list(items: List[Any], size: int) -> List[List[Any]]:
-    if size <= 0:
-        return [items]
-    return [items[i:i + size] for i in range(0, len(items), size)]
-
-
-# =========================
-# API CALL LOG MODEL
-# =========================
-
-@dataclass
-class ApiCall:
-    operation: str
-    ok: bool
-    status_code: Optional[int]
-    duration_ms: int
-    error: Optional[str] = None
-
-
-# =========================
-# CONNECTOR CLIENT
-# =========================
-
-class MewsConnector:
-    def __init__(self, base_url: str, client_token: str, access_token: str, client_name: str = DEFAULT_CLIENT_NAME):
-        self.base_url = base_url.rstrip("/")
-        self.client_token = client_token.strip()
-        self.access_token = access_token.strip()
-        self.client_name = client_name
-        self.calls: List[ApiCall] = []
-
-    def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"{self.base_url}/{path.lstrip('/')}"
-        body = dict(payload)
-        body.setdefault("ClientToken", self.client_token)
-        body.setdefault("AccessToken", self.access_token)
-        body.setdefault("Client", self.client_name)
-
-        t0 = time.time()
-        resp = None
-        try:
-            resp = requests.post(url, json=body, timeout=DEFAULT_TIMEOUT)
-            dt = int((time.time() - t0) * 1000)
-
-            try:
-                data = resp.json()
-            except Exception:
-                data = {"_raw": resp.text}
-
-            self.calls.append(ApiCall(
-                operation=path,
-                ok=bool(resp.ok),
-                status_code=resp.status_code,
-                duration_ms=dt,
-                error=None if resp.ok else (data.get("Message") if isinstance(data, dict) else str(data))
-            ))
-
-            if not resp.ok:
-                raise RuntimeError(f"HTTP {resp.status_code} for {path}: {data}")
-            if not isinstance(data, dict):
-                raise RuntimeError(f"Unexpected JSON shape for {path}: {type(data)}")
-            return data
-        except Exception as e:
-            dt = int((time.time() - t0) * 1000)
-            if resp is None:
-                self.calls.append(ApiCall(operation=path, ok=False, status_code=None, duration_ms=dt, error=str(e)))
-            raise
-
-    def get(self, domain: str, operation: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return self._post(f"{domain}/{operation}", payload)
-
-    def paged_get_all(
-        self,
-        domain: str,
-        operation: str,
-        base_payload: Dict[str, Any],
-        result_key: str,
-        count_per_page: int = 1000,
-        hard_limit: int = 50000,
-    ) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        cursor: Optional[str] = None
-        pages = 0
-
-        while True:
-            pages += 1
-            payload = dict(base_payload)
-            payload["Limitation"] = {"Count": count_per_page}
-            if cursor:
-                payload["Limitation"]["Cursor"] = cursor
-
-            data = self.get(domain, operation, payload)
-
-            batch = data.get(result_key)
-            if batch is None:
-                batch = []
-            if not isinstance(batch, list):
-                batch = []
-
-            for x in batch:
-                if isinstance(x, dict):
-                    out.append(x)
-
-            cursor = data.get("Cursor")
-            if not cursor:
-                break
-            if len(out) >= hard_limit or pages > 200:
-                break
-
-        return out
-
-
-# =========================
-# DATA COLLECTION (v6)
-# =========================
-
-def collect_data(base_url: str, client_token: str, access_token: str, client_name: str = DEFAULT_CLIENT_NAME) -> Dict[str, Any]:
-    mc = MewsConnector(base_url, client_token, access_token, client_name)
-    errors: Dict[str, str] = {}
-
-    def fetch_list(key: str, domain: str, operation: str, payload: Dict[str, Any], result_key: str,
-                   count_per_page: int = 1000, hard_limit: int = 50000) -> List[Dict[str, Any]]:
-        try:
-            return mc.paged_get_all(domain, operation, payload, result_key, count_per_page=count_per_page, hard_limit=hard_limit)
-        except Exception as e:
-            errors[key] = str(e)
-            return []
-
-    cfg: Dict[str, Any] = {}
-    try:
-        cfg = mc.get("Configuration", "Get", {})
-    except Exception as e:
-        errors["configuration_get"] = str(e)
-        cfg = {}
-
-    ent = (cfg.get("Enterprise") or {}) if isinstance(cfg, dict) else {}
-    ent_id = ent.get("Id")
-    enterprises = [ent_id] if ent_id else []
-
-    services = fetch_list("services_getall", "Services", "GetAll",
-                          {"EnterpriseIds": enterprises} if enterprises else {}, "Services")
-    service_ids = [s.get("Id") for s in services if isinstance(s, dict) and s.get("Id")]
-
-    if service_ids:
-        rate_groups = fetch_list("rate_groups_getall", "RateGroups", "GetAll", {"ServiceIds": service_ids}, "RateGroups")
-        rates = fetch_list("rates_getall", "Rates", "GetAll", {"ServiceIds": service_ids}, "Rates")
-        products = fetch_list("products_getall", "Products", "GetAll", {"ServiceIds": service_ids}, "Products")
-        restrictions = fetch_list("restrictions_getall", "Restrictions", "GetAll", {"ServiceIds": service_ids}, "Restrictions")
-    else:
-        rate_groups, rates, products, restrictions = [], [], [], []
-        if "services_getall" not in errors:
-            errors["services_missing"] = "No ServiceIds found; service-scoped data cannot be retrieved."
-
-    # Resource categories per service
-    resource_categories: List[Dict[str, Any]] = []
-    if service_ids:
-        for sid in service_ids:
-            cats = fetch_list(f"resource_categories_getall_{sid}", "ResourceCategories", "GetAll",
-                              {"ServiceIds": [sid]}, "ResourceCategories")
-            if cats:
-                resource_categories.extend(cats)
-    else:
-        resource_categories = []
-
-    accounting_categories = fetch_list("accounting_categories_getall", "AccountingCategories", "GetAll",
-                                       {"EnterpriseIds": enterprises} if enterprises else {}, "AccountingCategories")
-    resources = fetch_list("resources_getall", "Resources", "GetAll",
-                           {"EnterpriseIds": enterprises} if enterprises else {}, "Resources")
-
-    tax_envs = fetch_list("tax_environments_getall", "TaxEnvironments", "GetAll",
-                          {"EnterpriseIds": enterprises} if enterprises else {}, "TaxEnvironments")
-    taxations = fetch_list("taxations_getall", "Taxations", "GetAll",
-                           {"EnterpriseIds": enterprises} if enterprises else {}, "Taxations")
-
-    resource_category_assignments: List[Dict[str, Any]] = []
-    try:
-        rc_ids = [c.get("Id") for c in resource_categories if isinstance(c, dict) and c.get("Id")]
-        if rc_ids:
-            resource_category_assignments = mc.paged_get_all(
-                "ResourceCategoryAssignments", "GetAll",
-                {"ResourceCategoryIds": rc_ids},
-                "ResourceCategoryAssignments"
-            )
-        else:
-            resource_category_assignments = []
-    except Exception as e:
-        errors["resource_category_assignments_getall"] = str(e)
-        resource_category_assignments = []
-
-    payments: List[Dict[str, Any]] = []
-    try:
-        start = (utc_now() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        end = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
-        payments = mc.paged_get_all(
-            "Payments", "GetAll",
-            {"EnterpriseIds": enterprises, "CreatedUtc": {"StartUtc": start, "EndUtc": end}},
-            "Payments",
-            count_per_page=500, hard_limit=20000,
-        )
-    except Exception as e:
-        errors["payments_getall"] = str(e)
-        payments = []
-
-    cancellation_policies: List[Dict[str, Any]] = []
-    if service_ids:
-        cancellation_policies = fetch_list("cancellation_policies_getall", "CancellationPolicies", "GetAll",
-                                           {"ServiceIds": service_ids}, "CancellationPolicies")
-
-    rules: List[Dict[str, Any]] = []
-    if service_ids:
-        rules = fetch_list("rules_getall", "Rules", "GetAll", {"ServiceIds": service_ids}, "Rules")
-
-    counters = fetch_list("counters_getall", "Counters", "GetAll",
-                          {"EnterpriseIds": enterprises} if enterprises else {}, "Counters")
-    cashiers = fetch_list("cashiers_getall", "Cashiers", "GetAll",
-                          {"EnterpriseIds": enterprises} if enterprises else {}, "Cashiers")
-
-    return {
-        "cfg": cfg,
-        "enterprises": enterprises,
-        "services": services,
-        "service_ids": service_ids,
-        "rate_groups": rate_groups,
-        "rates": rates,
-        "products": products,
-        "accounting_categories": accounting_categories,
-        "resources": resources,
-        "resource_categories": resource_categories,
-        "resource_category_assignments": resource_category_assignments,
-        "restrictions": restrictions,
-        "payments": payments,
-        "cancellation_policies": cancellation_policies,
-        "rules": rules,
-        "tax_environments": tax_envs,
-        "taxations": taxations,
-        "counters": counters,
-        "cashiers": cashiers,
-        "errors": errors,
-        "api_calls": [c.__dict__ for c in mc.calls],
+  <style>
+    :root{
+      --terracotta:#A75A32; --gold:#E6B655; --seafoam:#83B8B4; --olive:#7E8C4F; --cream:#F9F6F0; --teal:#2F4A4E; --ink:#243133;
+      --maxw:1100px; --radius:18px; --shadow:0 10px 30px rgba(47,74,78,.12);
+      --hero-image:url('data:image/svg+xml;utf8,\
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800">\
+          <defs>\
+            <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">\
+              <stop offset="0%" stop-color="%2383B8B4"/>\
+              <stop offset="60%" stop-color="%23F9F6F0"/>\
+            </linearGradient>\
+            <linearGradient id="sea" x1="0" y1="0" x2="1" y2="0">\
+              <stop offset="0%" stop-color="%232F4A4E"/>\
+              <stop offset="100%" stop-color="%2383B8B4"/>\
+            </linearGradient>\
+          </defs>\
+          <rect width="1200" height="800" fill="url(%23sky)"/>\
+          <path d="M0,520 C200,480 400,560 600,520 C800,480 1000,560 1200,520 L1200,800 L0,800 Z" fill="url(%23sea)" opacity="0.85"/>\
+          <circle cx="980" cy="140" r="55" fill="%23E6B655" opacity="0.9"/>\
+        </svg>');
     }
 
-
-# =========================
-# REPORT MODEL
-# =========================
-
-@dataclass
-class CheckItem:
-    key: str
-    status: str
-    summary: str
-    source: str
-    remediation: str
-    details: Dict[str, Any] = field(default_factory=dict)
-    risk: str = "Medium"
-
-
-@dataclass
-class AuditReport:
-    enterprise_id: str
-    enterprise_name: str
-    base_url: str
-    client_name: str
-    generated_utc: datetime
-    api_calls: List[ApiCall]
-    sections: List[Tuple[str, List[CheckItem]]]
-
-
-# =========================
-# TABLE DERIVATIONS
-# =========================
-
-def safe_float(x: Any) -> Optional[float]:
-    try:
-        if x is None:
-            return None
-        return float(x)
-    except Exception:
-        return None
-
-
-def money_from_extended_amount(ext: Any) -> str:
-    if not isinstance(ext, dict):
-        return ""
-    for k in ("GrossValue", "Value", "Amount", "NetValue"):
-        v = safe_float(ext.get(k))
-        if v is not None:
-            return f"{v:.2f}"
-    return ""
-
-
-def configured_tax_percent_for_product(product: Dict[str, Any], taxations: List[Dict[str, Any]]) -> str:
-    """
-    Return configured VAT % for a product.
-    Priority:
-    1) Product-level Taxations (list) if it contains dicts with a rate/percent
-    2) Product TaxationId / TaxationIds / TaxId -> look up in Taxations/GetAll
-    3) Fallback direct fields if present
-    """
-    if not isinstance(product, dict):
-        return ""
-
-    # 1) If the product already contains taxation objects, prefer those.
-    tx_list = product.get("Taxations")
-    if isinstance(tx_list, list) and tx_list:
-        first = tx_list[0]
-        if isinstance(first, dict):
-            for k in ("Rate", "Percentage", "Percent", "Value"):
-                v = safe_float(first.get(k))
-                if v is not None:
-                    if 0 < v <= 1:
-                        v = v * 100
-                    return f"{v:.2f}%"
-            # Sometimes the object uses Id only
-            if first.get("Id"):
-                taxation_id = first.get("Id")
-            else:
-                taxation_id = None
-        elif isinstance(first, str):
-            taxation_id = first
-        else:
-            taxation_id = None
-    else:
-        taxation_id = None
-
-    # 2) Resolve an id from common fields
-    if not taxation_id:
-        tid = product.get("TaxationId") or product.get("TaxId") or product.get("Taxation")
-        if isinstance(tid, dict):
-            # Sometimes "Taxation" is an object
-            for k in ("Rate", "Percentage", "Percent", "Value"):
-                v = safe_float(tid.get(k))
-                if v is not None:
-                    if 0 < v <= 1:
-                        v = v * 100
-                    return f"{v:.2f}%"
-            tid = tid.get("Id")
-        if not tid:
-            tids = product.get("TaxationIds")
-            if isinstance(tids, list) and tids:
-                tid = tids[0]
-        taxation_id = tid
-
-    # 3) Direct fields fallback (rare, but seen in some payload shapes)
-    for k in ("VatPercent", "VATPercent", "TaxPercent", "TaxRate"):
-        v = safe_float(product.get(k))
-        if v is not None:
-            if 0 < v <= 1:
-                v = v * 100
-            return f"{v:.2f}%"
-
-    if not taxation_id or not isinstance(taxations, list):
-        return ""
-
-    tx = None
-    for t in taxations:
-        if isinstance(t, dict) and t.get("Id") == taxation_id:
-            tx = t
-            break
-    if not isinstance(tx, dict):
-        return ""
-
-    for k in ("Rate", "Percentage", "Percent", "Value"):
-        v = safe_float(tx.get(k))
-        if v is not None:
-            if 0 < v <= 1:
-                v = v * 100
-            return f"{v:.2f}%"
-    return ""
-    taxation_id = (
-        product.get("TaxationId")
-        or product.get("TaxId")
-        or product.get("Taxation")
-        or (product.get("Taxations")[0] if isinstance(product.get("Taxations"), list) and product.get("Taxations") else None)
-        or (product.get("TaxationIds")[0] if isinstance(product.get("TaxationIds"), list) and product.get("TaxationIds") else None)
-    )
-    if not taxation_id or not isinstance(taxations, list):
-        return ""
-    tx = None
-    for t in taxations:
-        if isinstance(t, dict) and t.get("Id") == taxation_id:
-            tx = t
-            break
-    if not isinstance(tx, dict):
-        return ""
-    for k in ("Rate", "Percentage", "Percent", "Value"):
-        v = safe_float(tx.get(k))
-        if v is not None:
-            if 0 < v <= 1:
-                v = v * 100
-            return f"{v:.2f}%"
-    return ""
-
-
-def parse_utc(dt_str: Any) -> Optional[datetime]:
-    if not isinstance(dt_str, str) or not dt_str:
-        return None
-    try:
-        if dt_str.endswith("Z"):
-            return datetime.fromisoformat(dt_str.replace("Z", "+00:00")).astimezone(timezone.utc)
-        return datetime.fromisoformat(dt_str).astimezone(timezone.utc)
-    except Exception:
-        return None
-
-
-def build_accounting_categories_table(accounting_categories: List[Dict[str, Any]],
-                                      products: List[Dict[str, Any]],
-                                      services: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    svc_by_id = {s.get("Id"): (pick_name(s) or s.get("Name") or s.get("Id") or "") for s in services if s.get("Id")}
-    svc_ids_by_cat: Dict[str, List[str]] = {}
-    for p in products:
-        cid = p.get("AccountingCategoryId")
-        sid = p.get("ServiceId")
-        if cid and sid:
-            svc_ids_by_cat.setdefault(cid, [])
-            if sid not in svc_ids_by_cat[cid]:
-                svc_ids_by_cat[cid].append(sid)
-
-    rows: List[Dict[str, Any]] = []
-    for c in accounting_categories:
-        cid = c.get("Id") or ""
-        svc_names = [svc_by_id.get(sid, sid) for sid in svc_ids_by_cat.get(cid, [])]
-        rows.append({
-            "Accounting category": c.get("Name") or "",
-            "Accounting category ID": cid,
-            "Ledger account code": c.get("LedgerAccountCode") or "",
-            "Classification": c.get("Classification") or "",
-            "Service": ", ".join([n for n in svc_names if n]) or "—",
-        })
-    rows.sort(key=lambda x: (x.get("Accounting category") or "").lower())
-    return rows
-
-
-def build_product_mapping_table(products: List[Dict[str, Any]],
-                                accounting_categories: List[Dict[str, Any]],
-                                taxations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Product mapping table (gross price only).
-    We intentionally do NOT calculate VAT here (per latest requirement).
-    """
-    cat_by_id = {c.get("Id"): c for c in accounting_categories if c.get("Id")}
-    rows: List[Dict[str, Any]] = []
-    for p in products:
-        cat = cat_by_id.get(p.get("AccountingCategoryId"))
-        rows.append({
-            "Product": pick_name(p) or "",
-            "Accounting category": (cat.get("Name") if isinstance(cat, dict) else "UNMAPPED") or "UNMAPPED",
-            "Gross price": money_from_extended_amount(p.get("Price")),
-            "Charging": p.get("ChargingMode") or "",
-        })
-    rows.sort(key=lambda x: (x.get("Accounting category") or "", x.get("Product") or ""))
-    return rows
-
-
-def build_spaces_table(resources: List[Dict[str, Any]],
-                       resource_categories: List[Dict[str, Any]],
-                       assignments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Build a table of: resource category name, space name, state.
-
-    Mews tenants differ slightly in payload shape for ResourceCategoryAssignments.
-    Handle the common variants:
-      - ResourceId / ResourceCategoryId
-      - ResourceIds (list) / ResourceCategoryId
-      - ResourceId / CategoryId (or ResourceCategory) style keys
-    """
-    cat_by_id = {c.get("Id"): c for c in resource_categories if isinstance(c, dict) and c.get("Id")}
-    res_by_id = {r.get("Id"): r for r in resources if isinstance(r, dict) and r.get("Id")}
-
-    def get_category_id(a: Dict[str, Any]) -> Optional[str]:
-        cid = a.get("ResourceCategoryId") or a.get("CategoryId") or a.get("ResourceCategory")
-        if isinstance(cid, dict):
-            return cid.get("Id")
-        return cid if isinstance(cid, str) else None
-
-    def get_resource_ids(a: Dict[str, Any]) -> List[str]:
-        rid = a.get("ResourceId") or a.get("Resource")
-        if isinstance(rid, dict):
-            rid = rid.get("Id")
-        if isinstance(rid, str):
-            return [rid]
-        rids = a.get("ResourceIds")
-        if isinstance(rids, list):
-            return [x for x in rids if isinstance(x, str)]
-        # Some shapes use "Resources": [{"Id": ...}, ...]
-        rs = a.get("Resources")
-        if isinstance(rs, list):
-            out = []
-            for x in rs:
-                if isinstance(x, dict) and isinstance(x.get("Id"), str):
-                    out.append(x["Id"])
-            return out
-        return []
-
-    rows: List[Dict[str, Any]] = []
-    assigned_resource_ids: set = set()
-
-    for a in assignments:
-        if not isinstance(a, dict):
-            continue
-        cid = get_category_id(a)
-        c = cat_by_id.get(cid) if cid else None
-        cat_name = (pick_name(c) or (c.get("Name") if isinstance(c, dict) else "") or "UNASSIGNED") if c else "UNASSIGNED"
-
-        for rid in get_resource_ids(a):
-            r = res_by_id.get(rid)
-            if not r:
-                continue
-            assigned_resource_ids.add(rid)
-            rows.append({
-                "Resource category": cat_name,
-                "Space": r.get("Name") or "",
-                "State": r.get("State") or "",
-            })
-
-    # Add truly unassigned spaces (no assignment rows matched their IDs)
-    for r in resources:
-        rid = r.get("Id")
-        if isinstance(rid, str) and rid not in assigned_resource_ids:
-            rows.append({
-                "Resource category": "UNASSIGNED",
-                "Space": r.get("Name") or "",
-                "State": r.get("State") or "",
-            })
-
-    rows.sort(key=lambda x: (x.get("Resource category") or "", x.get("Space") or ""))
-    return rows
-
-
-def build_rate_groups_table(rate_groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    for g in rate_groups:
-        rows.append({
-            "Rate group": pick_name(g) or (g.get("Name") or ""),
-            "Rate group ID": g.get("Id") or "",
-            "Activity state": "Active" if g.get("IsActive") else "Inactive",
-        })
-    rows.sort(key=lambda x: (x.get("Rate group") or "").lower())
-    return rows
-
-
-def build_rates_table(rates: List[Dict[str, Any]], rate_groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    rg_by_id = {g.get("Id"): g for g in rate_groups if g.get("Id")}
-    rate_by_id = {r.get("Id"): r for r in rates if r.get("Id")}
-
-    def rname(r: Optional[Dict[str, Any]]) -> str:
-        if not isinstance(r, dict):
-            return ""
-        return pick_name(r) or (r.get("Code") or "") or ""
-
-    rows: List[Dict[str, Any]] = []
-    for r in rates:
-        base = rate_by_id.get(r.get("BaseRateId")) if r.get("BaseRateId") else None
-        rg = rg_by_id.get(r.get("GroupId")) if r.get("GroupId") else None
-
-        visibility = "Public" if r.get("IsPublic") else ("Private" if r.get("IsPrivate") else "—")
-        status = "Active" if r.get("IsActive") else "Inactive"
-        if r.get("IsEnabled") is False:
-            status = "Disabled"
-
-        rows.append({
-            "Rate": rname(r),
-            "Rate ID": r.get("Id") or "",
-            "Base rate": rname(base),
-            "Rate group": pick_name(rg) if isinstance(rg, dict) else "",
-            "Visibility": visibility,
-            "Status": status,
-        })
-    rows.sort(key=lambda x: (x.get("Rate group") or "", x.get("Rate") or ""))
-    return rows
-
-
-def summarise_restriction_exceptions(ex: Any) -> str:
-    if not isinstance(ex, dict) or not ex:
-        return "—"
-    bits: List[str] = []
-    for k, label in (("MinAdvance", "Min advance"), ("MaxAdvance", "Max advance"), ("MinLength", "Min length"), ("MaxLength", "Max length")):
-        v = ex.get(k)
-        if v:
-            bits.append(f"{label}: {v}")
-    return "; ".join(bits) if bits else "—"
-
-
-def summarise_restriction_time(cond: Any) -> str:
-    if not isinstance(cond, dict):
-        return "None → None"
-    s = cond.get("StartUtc") or "None"
-    e = cond.get("EndUtc") or "None"
-    days = cond.get("Days")
-    bits = [f"{s} → {e}"]
-    if isinstance(days, list) and days:
-        bits.append("Days: " + ",".join(days))
-    return " | ".join(bits)
-
-
-def build_restrictions_table(restrictions: List[Dict[str, Any]],
-                             rates: List[Dict[str, Any]],
-                             rate_groups: List[Dict[str, Any]],
-                             resource_categories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    now = utc_now()
-    rate_by_id = {r.get("Id"): r for r in rates if r.get("Id")}
-    rg_by_id = {g.get("Id"): g for g in rate_groups if g.get("Id")}
-    cat_by_id = {c.get("Id"): c for c in resource_categories if c.get("Id")}
-
-    rows: List[Dict[str, Any]] = []
-    for r in restrictions:
-        cond = r.get("Conditions") if isinstance(r, dict) else None
-        if not isinstance(cond, dict):
-            continue
-
-        start = parse_utc(cond.get("StartUtc"))
-        if start and start <= now:
-            continue
-
-        rate_bits: List[str] = []
-        if cond.get("ExactRateId"):
-            rr = rate_by_id.get(cond.get("ExactRateId"))
-            rate_bits.append("Rate: " + (pick_name(rr) if rr else ""))
-        if cond.get("BaseRateId"):
-            br = rate_by_id.get(cond.get("BaseRateId"))
-            rate_bits.append("Base rate: " + (pick_name(br) if br else ""))
-        if cond.get("RateGroupId"):
-            g = rg_by_id.get(cond.get("RateGroupId"))
-            rate_bits.append("Group: " + (pick_name(g) if g else ""))
-        rates_scope = "; ".join([b for b in rate_bits if b.strip()]) or "All rates"
-
-        spaces_scope = "All spaces"
-        if cond.get("ResourceCategoryId"):
-            c = cat_by_id.get(cond.get("ResourceCategoryId"))
-            spaces_scope = (pick_name(c) if isinstance(c, dict) else "") or "All spaces"
-
-        rows.append({
-            "Time": summarise_restriction_time(cond),
-            "Rates": rates_scope,
-            "Spaces": spaces_scope,
-            "Exceptions": summarise_restriction_exceptions(r.get("Exceptions")),
-        })
-
-    rows.sort(key=lambda x: x.get("Time") or "")
-    return rows
-
-
-def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "AuditReport":
-    cfg = data.get("cfg", {}) or {}
-    services = data.get("services", []) or []
-    rate_groups = data.get("rate_groups", []) or []
-    rates = data.get("rates", []) or []
-    accounting_categories = data.get("accounting_categories", []) or []
-    products = data.get("products", []) or []
-    payments = data.get("payments", []) or []
-    resources = data.get("resources", []) or []
-    resource_categories = data.get("resource_categories", []) or []
-    rca = data.get("resource_category_assignments", []) or []
-    restrictions = data.get("restrictions", []) or []
-    tax_envs = data.get("tax_environments", []) or []
-    taxations = data.get("taxations", []) or []
-    counters = data.get("counters", []) or []
-    cashiers = data.get("cashiers", []) or []
-    errors = data.get("errors", {}) or {}
-
-    acc_categories_table = build_accounting_categories_table(accounting_categories, products, services)
-    product_mapping_table = build_product_mapping_table(products, accounting_categories, taxations)
-    spaces_table = build_spaces_table(resources, resource_categories, rca)
-    rate_groups_table = build_rate_groups_table(rate_groups)
-    rates_table = build_rates_table(rates, rate_groups)
-    restrictions_table = build_restrictions_table(restrictions, rates, rate_groups, resource_categories)
-
-    ent = (cfg.get("Enterprise") or {}) if isinstance(cfg, dict) else {}
-    enterprise_id = ent.get("Id") or (data.get("enterprises", [""])[0] if data.get("enterprises") else "")
-    enterprise_name = ent.get("Name") or "Unknown"
-
-    def status_for(keys: List[str], default_ok: str) -> Tuple[str, str]:
-        errs = []
-        for k in keys:
-            if k in errors and errors[k]:
-                errs.append(f"{k}: {errors[k]}")
-        if errs:
-            return "NEEDS_INPUT", " | ".join(errs)
-        return default_ok, ""
-
-    sections: List[Tuple[str, List[CheckItem]]] = []
-
-    legal_items: List[CheckItem] = []
-    tz = (cfg.get("Enterprise") or {}).get("TimeZone") if isinstance(cfg, dict) else None
-    currency = (cfg.get("Enterprise") or {}).get("DefaultCurrency") if isinstance(cfg, dict) else None
-
-    st_tax, err_tax = status_for(["tax_environments_getall", "taxations_getall"], "PASS" if (tax_envs or taxations) else "WARN")
-    summary = f"TaxEnvironments={len(tax_envs)}, Taxations={len(taxations)}"
-    if err_tax:
-        summary += f" | {err_tax}"
-    legal_items.append(CheckItem("Time zone", "PASS" if tz else "WARN", str(tz or "Not identified"), "Connector: Configuration/Get", "Set enterprise/property time zone in Mews if missing.", {}, "High" if not tz else "Low"))
-    legal_items.append(CheckItem("Default currency", "PASS" if currency else "WARN", str(currency or "Not identified"), "Connector: Configuration/Get", "Ensure a default currency is set at enterprise level.", {}, "High" if not currency else "Low"))
-    legal_items.append(CheckItem("Tax environment + VAT/GST rates", st_tax, summary, "Connector: TaxEnvironments/GetAll + Taxations/GetAll", "Validate tax environment selection and tax codes match jurisdiction.", {"TaxEnvironments": tax_envs[:200], "Taxations": taxations[:500]}, "Medium"))
-
-    st_cfg, err_cfg = status_for(["configuration_get"], "PASS")
-    if err_cfg:
-        legal_items.append(CheckItem("Configuration retrieval", "NEEDS_INPUT", err_cfg, "Connector: Configuration/Get", "Confirm API base URL and tokens; ensure Connector API is accessible.", {}, "High"))
-
-    sections.append(("Legal & property baseline", legal_items))
-
-    accounting_items: List[CheckItem] = []
-    st_ac, err_ac = status_for(["accounting_categories_getall"], "PASS" if accounting_categories else "WARN")
-    s = f"Accounting categories returned: {len(accounting_categories)}"
-    if err_ac:
-        s += f" | {err_ac}"
-    accounting_items.append(CheckItem(
-        key="Accounting categories (list)",
-        status=st_ac,
-        summary=s,
-        source="Connector: AccountingCategories/GetAll",
-        remediation="Review category codes/classifications and ledger mappings; confirm alignment with finance export.",
-        details={"AccountingCategoriesTable": acc_categories_table},
-        risk="High"
-    ))
-
-    st_prod, err_prod = status_for(["products_getall", "taxations_getall"], "PASS" if products else "WARN")
-    s = f"Products returned: {len(products)}"
-    if err_prod:
-        s += f" | {err_prod}"
-    accounting_items.append(CheckItem(
-        key="Product mapping (product → accounting category)",
-        status=st_prod,
-        summary=s,
-        source="Connector: Products/GetAll + AccountingCategories/GetAll",
-        remediation="Validate each product is mapped to the correct accounting category, uses the intended taxation, and has the correct charging mode.",
-        details={"ProductMappingTable": product_mapping_table},
-        risk="High"
-    ))
-
-    st_cash, err_cash = status_for(["cashiers_getall", "counters_getall"], "PASS" if (cashiers or counters) else "WARN")
-    s = f"Cashiers={len(cashiers)}, Counters={len(counters)}"
-    if err_cash:
-        s += f" | {err_cash}"
-    accounting_items.append(CheckItem(
-        key="Cash / counters",
-        status=st_cash,
-        summary=s,
-        source="Connector: Cashiers/GetAll + Counters/GetAll",
-        remediation="Ensure cashiers are assigned and counters/numbering comply with local rules.",
-        details={},
-        risk="Medium"
-    ))
-    sections.append(("Accounting configuration", accounting_items))
-
-    pay_items: List[CheckItem] = []
-    st_pay, err_pay = status_for(["payments_getall"], "PASS")
-    s = f"Payments retrieved: {len(payments)}"
-    if err_pay:
-        s += f" | {err_pay}"
-    pay_items.append(CheckItem(
-        key="Payments (last 30 days sample)",
-        status=st_pay,
-        summary=s,
-        source="Connector: Payments/GetAll (CreatedUtc 30d window)",
-        remediation="If empty or failing, verify token scope/permissions and that the CreatedUtc window is supported.",
-        details={"Payments": payments},
-        risk="Low"
-    ))
-    sections.append(("Payments", pay_items))
-
-    inv_items: List[CheckItem] = []
-    space_err_keys = ["services_getall", "resources_getall", "resource_category_assignments_getall"]
-    space_err_keys.extend([k for k in errors.keys() if k.startswith("resource_categories_getall_")])
-
-    st_spaces, err_spaces = status_for(space_err_keys, "PASS" if resources else "WARN")
-    s = f"Spaces={len(resources)}, ResourceCategories={len(resource_categories)}, Assignments={len(rca)}"
-    if err_spaces:
-        s += f" | {err_spaces}"
-    inv_items.append(CheckItem(
-        key="Spaces and resource categories",
-        status=st_spaces,
-        summary=s,
-        source="Connector: Services/GetAll + Resources/GetAll + ResourceCategories/GetAll + ResourceCategoryAssignments/GetAll",
-        remediation="Confirm each space is assigned to the correct resource category and has the expected state. If assignments cannot be retrieved, re-check token scope/endpoint validation for your tenant.",
-        details={"SpacesTable": spaces_table},
-        risk="High"
-    ))
-
-    st_rg, err_rg = status_for(["rate_groups_getall"], "PASS" if rate_groups else "WARN")
-    s = f"RateGroups={len(rate_groups)}"
-    if err_rg:
-        s += f" | {err_rg}"
-    inv_items.append(CheckItem(
-        key="Rate groups",
-        status=st_rg,
-        summary=s,
-        source="Connector: RateGroups/GetAll",
-        remediation="Review rate group list and activity state.",
-        details={"RateGroupsTable": rate_groups_table},
-        risk="Medium"
-    ))
-
-    st_rates, err_rates = status_for(["rates_getall"], "PASS" if rates else "WARN")
-    s = f"Rates={len(rates)}"
-    if err_rates:
-        s += f" | {err_rates}"
-    inv_items.append(CheckItem(
-        key="Rates",
-        status=st_rates,
-        summary=s,
-        source="Connector: Rates/GetAll",
-        remediation="Review rate list, base rate inheritance, group membership, visibility and status.",
-        details={"RatesTable": rates_table},
-        risk="High"
-    ))
-
-    st_rest, err_rest = status_for(["restrictions_getall"], "PASS" if restrictions else "WARN")
-    s = f"Restrictions returned: {len(restrictions)}; Future-only rows: {len(restrictions_table)}"
-    if err_rest:
-        s += f" | {err_rest}"
-    inv_items.append(CheckItem(
-        key="Restrictions (future stays)",
-        status=st_rest,
-        summary=s,
-        source="Connector: Restrictions/GetAll",
-        remediation="Review future-only restrictions for correctness of time window, rate scope, space scope and exceptions.",
-        details={"RestrictionsTable": restrictions_table},
-        risk="Medium"
-    ))
-    sections.append(("Spaces, rates & restrictions", inv_items))
-
-    calls: List[ApiCall] = []
-    for c in data.get("api_calls", []):
-        if isinstance(c, dict):
-            calls.append(ApiCall(
-                operation=str(c.get("operation") or ""),
-                ok=bool(c.get("ok")),
-                status_code=c.get("status_code"),
-                duration_ms=int(c.get("duration_ms") or 0),
-                error=c.get("error"),
-            ))
-
-    return AuditReport(
-        enterprise_id=str(enterprise_id or ""),
-        enterprise_name=str(enterprise_name or "Unknown"),
-        base_url=base_url,
-        client_name=client_name,
-        generated_utc=utc_now(),
-        api_calls=calls,
-        sections=sections,
-    )
-
-
-def fetch_logo():
-    if not LOGO_URL:
-        return None
-    try:
-        resp = requests.get(LOGO_URL, timeout=10)
-        if not resp.ok:
-            return None
-        tmp = "/tmp/logo.svg"
-        with open(tmp, "wb") as f:
-            f.write(resp.content)
-        return svg2rlg(tmp)
-    except Exception:
-        return None
-
-
-def build_pdf(report: AuditReport) -> bytes:
-    from io import BytesIO
-
-    buf = BytesIO()
-
-    # --- Font registration (Manrope for headings, Inter for body) ---
-    FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
-    pdfmetrics.registerFont(TTFont("Inter", os.path.join(FONT_DIR, "Inter-Regular.ttf")))
-    pdfmetrics.registerFont(TTFont("Manrope", os.path.join(FONT_DIR, "Manrope-Regular.ttf")))
-    pdfmetrics.registerFont(TTFont("Manrope-Semibold", os.path.join(FONT_DIR, "Manrope-SemiBold.ttf")))
-
-    styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(
-        name="TitleX",
-        parent=styles["Title"],
-        fontName="Manrope-Semibold",
-        fontSize=20,
-        leading=24,
-        alignment=TA_CENTER,
-        spaceAfter=10,
-        textColor=colors.HexColor("#1C1D24"),
-    ))
-
-    styles.add(ParagraphStyle(
-        name="H1X",
-        parent=styles["Heading1"],
-        fontName="Manrope-Semibold",
-        fontSize=15,
-        leading=18,
-        spaceBefore=10,
-        spaceAfter=6,
-        textColor=colors.HexColor("#1C1D24"),
-    ))
-
-    styles.add(ParagraphStyle(
-        name="BodyX",
-        parent=styles["BodyText"],
-        fontName="Inter",
-        fontSize=9.6,
-        leading=12,
-        textColor=colors.HexColor("#1C1D24"),
-    ))
-
-    styles.add(ParagraphStyle(
-        name="SmallX",
-        parent=styles["BodyText"],
-        fontName="Inter",
-        fontSize=8.6,
-        leading=11,
-        textColor=colors.HexColor("#1C1D24"),
-    ))
-
-    styles.add(ParagraphStyle(
-        name="TinyX",
-        parent=styles["BodyText"],
-        fontName="Inter",
-        fontSize=8.1,
-        leading=10,
-        textColor=colors.HexColor("#1C1D24"),
-    ))
-
-    logo = fetch_logo()
-
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=A4,
-        leftMargin=16 * mm,
-        rightMargin=16 * mm,
-        topMargin=18 * mm,
-        bottomMargin=16 * mm,
-        title="Mews Configuration Audit Report",
-        author="Mews Audit Tool",
-    )
-
-    def P(text: Any, style: str = "TinyX") -> Paragraph:
-        return Paragraph(esc(text), styles[style])
-
-    def safe_para(text: str, style_name: str) -> Paragraph:
-        try:
-            return Paragraph(text, styles[style_name])
-        except Exception:
-            plain = text.replace("<", "&lt;").replace(">", "&gt;")
-            return Paragraph(plain, styles[style_name])
-
-    def badge(status: str) -> str:
-        st = (status or "").upper()
-        if st == "PASS":
-            return "<font color='#16a34a'><b>PASS</b></font>"
-        if st == "WARN":
-            return "<font color='#f59e0b'><b>WARN</b></font>"
-        if st == "FAIL":
-            return "<font color='#dc2626'><b>FAIL</b></font>"
-        if st == "NEEDS_INPUT":
-            return "<font color='#7c3aed'><b>NEEDS INPUT</b></font>"
-        return f"<font color='#64748b'><b>{esc(st)}</b></font>"
-
-    def make_long_table(header: List[str], rows: List[List[Any]], col_widths: List[float]) -> LongTable:
-        data: List[List[Any]] = [[P(h, "SmallX") for h in header]]
-        for r in rows:
-            data.append([c if isinstance(c, Paragraph) else P(c, "TinyX") for c in r])
-
-        t = LongTable(data, colWidths=col_widths, repeatRows=1)
-
-        id_cols = set()
-        for i, h in enumerate(header):
-            hl = (h or "").lower()
-            if "id" in hl or "uuid" in hl:
-                id_cols.add(i)
-
-        ts = TableStyle([
-            ("FONTNAME", (0, 0), (-1, -1), "Inter"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F7BCF1")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1C1D24")),
-            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cbd5e1")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 4),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ])
-        for ci in sorted(id_cols):
-            ts.add("FONTSIZE", (ci, 1), (ci, -1), 6.8)
-
-        for i in range(1, len(data)):
-            if i % 2 == 0:
-                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#FCEFFB"))
-
-        t.setStyle(ts)
-        return t
-
-    def header_footer(canvas, doc_):
-        canvas.saveState()
-
-        top_y = A4[1] - 10 * mm  # near top margin
-        right_x = A4[0] - 16 * mm
-
-        # Logo: top-right, aligned with OR slightly above the title line
-        # Keep it compact so it never collides with the page number.
-        target_h = 6.2 * mm
-        target_w = 24 * mm
-
-        x_logo = right_x - target_w
-        # Title baseline (left). Place logo on the same line, nudged slightly upward.
-        title_y = top_y - 3 * mm
-        y_logo = title_y + 1.2 * mm
-
-        if logo:
-            try:
-                lw = float(getattr(logo, "width", 0) or 0)
-                lh = float(getattr(logo, "height", 0) or 0)
-                if lw > 0 and lh > 0:
-                    s = min(target_w / lw, target_h / lh)
-                    canvas.saveState()
-                    canvas.translate(x_logo, y_logo)
-                    canvas.scale(s, s)
-                    renderPDF.draw(logo, canvas, 0, 0)
-                    canvas.restoreState()
-            except Exception:
-                pass
-
-        # Title on the left
-        canvas.setFont("Manrope-Semibold", 12.5)
-        canvas.drawString(16 * mm, title_y, "Mews Configuration Audit Report")
-
-        # Page number to the left of the logo box (so it never overlaps)
-        canvas.setFont("Inter", 8.5)
-        canvas.drawRightString(x_logo - 3 * mm, title_y, f"Page {doc_.page}")
-
-        canvas.restoreState()
-
-    story: List[Any] = []
-
-    story.append(Spacer(1, 16))
-    story.append(Paragraph("Mews Configuration Audit Report", styles["TitleX"]))
-    story.append(Paragraph(
-        f"<b>Enterprise:</b> {esc(report.enterprise_name or 'Unknown')} &nbsp;&nbsp; "
-        f"<b>EnterpriseId:</b> {esc(report.enterprise_id or 'Unknown')}<br/>"
-        f"<b>Generated (UTC):</b> {esc(report.generated_utc.strftime('%d/%m/%Y %H:%M'))} &nbsp;&nbsp; "
-        f"<b>Base URL:</b> {esc(report.base_url)} &nbsp;&nbsp; "
-        f"<b>Client:</b> {esc(report.client_name)}",
-        styles["BodyX"]
-    ))
-    story.append(Spacer(1, 10))
-
-    total = 0
-    counts = {"PASS": 0, "WARN": 0, "FAIL": 0, "NEEDS_INPUT": 0, "NA": 0}
-    for _, items in report.sections:
-        for it in items:
-            total += 1
-            counts[it.status] = counts.get(it.status, 0) + 1
-
-    story.append(Paragraph(
-        f"<b>Summary</b> &nbsp;&nbsp; Items: <b>{total}</b> &nbsp;&nbsp; "
-        f"PASS: <b>{counts.get('PASS',0)}</b> &nbsp;&nbsp; "
-        f"WARN: <b>{counts.get('WARN',0)}</b> &nbsp;&nbsp; "
-        f"FAIL: <b>{counts.get('FAIL',0)}</b> &nbsp;&nbsp; "
-        f"NEEDS_INPUT: <b>{counts.get('NEEDS_INPUT',0)}</b> &nbsp;&nbsp; "
-        f"NA: <b>{counts.get('NA',0)}</b>",
-        styles["BodyX"]
-    ))
-    story.append(PageBreak())
-
-    for sec_name, items in report.sections:
-        story.append(Paragraph(sec_name, styles["H1X"]))
-        story.append(Spacer(1, 6))
-
-        over_rows = []
-        for it in items:
-            over_rows.append([P(it.key, "SmallX"), safe_para(badge(it.status), "SmallX"), P(it.risk, "SmallX"), P(it.summary, "SmallX")])
-        story.append(make_long_table(["Check", "Status", "Risk", "Summary"], over_rows, [62*mm, 20*mm, 18*mm, 78*mm]))
-        story.append(Spacer(1, 8))
-
-        for it in items:
-            block: List[Any] = []
-            block.append(safe_para(f"<b>{esc(it.key)}</b> &nbsp;&nbsp; {badge(it.status)} &nbsp;&nbsp; <font color='#64748b'>Risk:</font> <b>{esc(it.risk)}</b>", "BodyX"))
-            block.append(Paragraph(esc(it.summary or "-"), styles["BodyX"]))
-            block.append(Spacer(1, 4))
-
-            details = it.details or {}
-
-            def render_dict_table(title: str, header: List[str], rows_dicts: List[Dict[str, Any]], colw: List[float], chunk: int = 350):
-                block.append(Paragraph(f"<b>Detail: {esc(title)}</b>", styles["SmallX"]))
-                block.append(Spacer(1, 3))
-                rows = [[P(r.get(h, "")) for h in header] for r in rows_dicts]
-                for ch in chunk_list(rows, chunk):
-                    block.append(make_long_table(header, ch, colw))
-                    block.append(Spacer(1, 6))
-
-            if "AccountingCategoriesTable" in details:
-                render_dict_table(
-                    "Accounting categories",
-                    ["Accounting category", "Accounting category ID", "Ledger account code", "Classification", "Service"],
-                    details.get("AccountingCategoriesTable") or [],
-                    [50*mm, 42*mm, 30*mm, 26*mm, 32*mm],
-                )
-
-            if "ProductMappingTable" in details:
-                render_dict_table(
-                    "Product mapping",
-                    ["Product", "Accounting category", "Gross price", "Charging"],
-                    details.get("ProductMappingTable") or [],
-                    [74*mm, 66*mm, 22*mm, 28*mm],
-                )
-
-            if "SpacesTable" in details:
-                render_dict_table(
-                    "Spaces and resource categories",
-                    ["Resource category", "Space", "State"],
-                    details.get("SpacesTable") or [],
-                    [66*mm, 84*mm, 28*mm],
-                    chunk=400,
-                )
-
-            if "RateGroupsTable" in details:
-                render_dict_table(
-                    "Rate groups",
-                    ["Rate group", "Rate group ID", "Activity state"],
-                    details.get("RateGroupsTable") or [],
-                    [86*mm, 58*mm, 32*mm],
-                )
-
-            if "RatesTable" in details:
-                render_dict_table(
-                    "Rates",
-                    ["Rate", "Rate ID", "Base rate", "Rate group", "Visibility", "Status"],
-                    details.get("RatesTable") or [],
-                    [44*mm, 34*mm, 38*mm, 44*mm, 18*mm, 18*mm],
-                )
-
-            if "RestrictionsTable" in details:
-                render_dict_table(
-                    "Restrictions (future stays)",
-                    ["Time", "Rates", "Spaces", "Exceptions"],
-                    details.get("RestrictionsTable") or [],
-                    [46*mm, 54*mm, 38*mm, 46*mm],
-                )
-
-            if "Payments" in details:
-                pays = details.get("Payments") or []
-                header = ["PaymentId", "Type", "State", "Curr", "Net", "Gross", "CreatedUtc"]
-                rows = []
-                for p in pays:
-                    amt = p.get("Amount") or {}
-                    rows.append([P(p.get("Id") or ""), P(p.get("Type") or ""), P(p.get("State") or ""),
-                                 P(amt.get("Currency") or p.get("Currency") or ""),
-                                 P(str(amt.get("NetValue") or "")),
-                                 P(str(amt.get("GrossValue") or "")),
-                                 P(p.get("CreatedUtc") or "")])
-                block.append(Paragraph("<b>Detail: Payments (30-day sample)</b>", styles["SmallX"]))
-                block.append(Spacer(1, 3))
-                for ch in chunk_list(rows, 300):
-                    block.append(make_long_table(header, ch, [38*mm, 22*mm, 16*mm, 10*mm, 16*mm, 16*mm, 44*mm]))
-                    block.append(Spacer(1, 6))
-
-            if it.source:
-                block.append(Paragraph(f"<font color='#64748b'><b>Source:</b> {esc(it.source)}</font>", styles["TinyX"]))
-            if it.remediation:
-                block.append(safe_para(f"<b>Recommendation:</b> {esc(it.remediation)}", "SmallX"))
-
-            block.append(Spacer(1, 10))
-            story.append(KeepTogether(block))
-
-        story.append(PageBreak())
-
-    story.append(Paragraph("Appendix: API call log", styles["H1X"]))
-    story.append(Spacer(1, 6))
-    rows = []
-    for c in report.api_calls:
-        line = f"{c.operation} | ok={c.ok} | http={c.status_code or ''} | {c.duration_ms}ms"
-        if c.error:
-            line += f" | {c.error}"
-        rows.append([P(line)])
-    for ch in chunk_list(rows, 500):
-        story.append(make_long_table(["Call"], ch, [A4[0] - (32 * mm)]))
-        story.append(Spacer(1, 6))
-
-    doc.build(story, onFirstPage=header_footer, onLaterPages=header_footer)
-    pdf = buf.getvalue()
-    if len(pdf) > MAX_PDF_MB * 1024 * 1024:
-        raise RuntimeError(f"Generated PDF too large ({len(pdf)/(1024*1024):.1f}MB) for environment limit ({MAX_PDF_MB}MB).")
-    return pdf
-
-
-HTML = """<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Mews Audit Backend</title><meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;margin:0;background:#0b1220;color:#e8eefc}
-.wrap{max-width:920px;margin:0 auto;padding:24px}
-.card{background:#111a2e;border:1px solid #1f2b4a;border-radius:14px;padding:18px;margin:14px 0}
-label{display:block;font-weight:600;margin:10px 0 6px}
-input{width:100%;padding:10px;border-radius:10px;border:1px solid #2a3a63;background:#0c1426;color:#e8eefc}
-.row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-.btn{display:inline-block;padding:12px 14px;border-radius:12px;border:0;background:#3b82f6;color:#fff;font-weight:700;cursor:pointer}
-.muted{color:#a9b7d6;font-size:13px;line-height:1.35}
-code{background:#0c1426;padding:2px 6px;border-radius:8px;border:1px solid #1f2b4a}
-</style></head>
-<body><div class="wrap">
-<h1>Mews Audit Backend</h1>
-<p class="muted">POST tokens to <code>/audit</code> to generate a PDF report.</p>
-<div class="card">
-<form method="post" action="/audit">
-  <div class="row">
-    <div><label>Client token</label><input name="client_token" placeholder="ClientToken"></div>
-    <div><label>Access token</label><input name="access_token" placeholder="AccessToken"></div>
+    html{scroll-behavior:smooth}
+    body{
+      margin:0;background:var(--cream);color:var(--teal);
+      font-family:'Raleway',system-ui,Segoe UI,Arial,sans-serif;line-height:1.6;
+      cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='10' fill='%23E6B655'/%3E%3Cg stroke='%23E6B655' stroke-width='4'%3E%3Cline x1='32' y1='2' x2='32' y2='14'/%3E%3Cline x1='32' y1='50' x2='32' y2='62'/%3E%3Cline x1='2' y1='32' x2='14' y2='32'/%3E%3Cline x1='50' y1='32' x2='62' y2='32'/%3E%3Cline x1='10' y1='10' x2='18' y2='18'/%3E%3Cline x1='46' y1='46' x2='54' y2='54'/%3E%3Cline x1='10' y1='54' x2='18' y2='46'/%3E%3Cline x1='46' y1='18' x2='54' y2='10'/%3E%3C/g%3E%3C/svg%3E") 13 13, auto
+    }
+
+    .container{max-width:var(--maxw);margin:0 auto;padding:0 20px}
+    .section{padding:72px 0;position:relative;scroll-margin-top:84px}
+    @media(min-width:900px){.section{padding:120px 0}}
+
+    /* Header */
+    header{position:sticky;top:0;z-index:1000;background:color-mix(in srgb,var(--cream) 90%,white 10%);border-bottom:1px solid #e8e3d9;backdrop-filter:blur(6px)}
+    .nav{display:flex;align-items:center;justify-content:space-between;gap:14px;height:64px}
+    .brand{display:inline-flex;align-items:center;gap:.6rem;color:var(--terracotta);text-decoration:none;font-weight:700}
+    .brand .logo{width:24px;height:24px}
+    .burger{display:inline-flex;width:40px;height:40px;border:1px solid #d8d3c8;border-radius:12px;background:#fff;align-items:center;justify-content:center}
+    .burger span{width:18px;height:2px;background:var(--teal);position:relative;display:block}
+    .burger span::before,.burger span::after{content:"";position:absolute;left:0;right:0;height:2px;background:var(--teal)}
+    .burger span::before{top:-6px}.burger span::after{top:6px}
+    nav ul{list-style:none;margin:0;padding:0;display:none;position:absolute;top:64px;left:16px;right:16px;background:#fff;border:1px solid #e8e3d9;border-radius:14px;box-shadow:var(--shadow)}
+    nav ul.open{display:block}
+    nav a{text-decoration:none;color:var(--teal);font-weight:600;display:block;padding:12px 14px}
+    nav a:hover{color:var(--terracotta)}
+    @media(min-width:880px){.burger{display:none} nav ul{position:static;display:flex;border:none;box-shadow:none} nav a{padding:0;margin-left:20px}}
+
+    /* HERO */
+    .hero{
+      display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;
+      min-height:90vh;padding:100px 20px 60px;position:relative;overflow:hidden;
+      background-image:linear-gradient(to bottom,rgba(249,246,240,.65),rgba(249,246,240,.12)),var(--hero-image);
+      background-size:cover;background-position:center;background-attachment:scroll
+    }
+    @media(min-width:900px){.hero{min-height:86vh;background-attachment:fixed;padding:160px 20px 100px}}
+    @media (prefers-reduced-motion: reduce){.hero{background-attachment:scroll}}
+    .hero .eyebrow{text-transform:uppercase;letter-spacing:.18em;font-size:.8rem;color:var(--olive)}
+    .hero .display{font-family:'Cormorant Garamond',serif;color:var(--terracotta);font-size:clamp(40px,8vw,72px);margin:12px 0 8px}
+    .hero .tagline{margin-bottom:24px;color:var(--teal);font-style:italic}
+
+    /* Countdown */
+    .countdown{display:flex;flex-direction:column;align-items:center;gap:8px;margin-bottom:24px}
+    .countdown .unit{background:#fff;border:1px solid #eadfcd;border-radius:12px;padding:8px 14px;min-width:120px}
+    .countdown .num{font-weight:700;color:var(--terracotta);font-size:1.4rem}
+    @media(min-width:600px){.countdown{flex-direction:row}}
+
+    /* CTAs */
+    .cta-row{display:flex;flex-direction:column;align-items:center;gap:12px}
+    @media(min-width:600px){.cta-row{flex-direction:row}}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:.6rem;border-radius:999px;padding:14px 18px;border:1px solid var(--terracotta);font-weight:600;text-decoration:none;box-shadow:var(--shadow);transition:transform .2s,box-shadow .2s,background .3s}
+    .btn{background:var(--terracotta);color:#fff}
+    .btn.alt{background:#fff;color:var(--terracotta)}
+    .btn:hover{transform:translateY(-2px);box-shadow:0 14px 40px rgba(167,90,50,.25);background:#964c28}
+
+    /* Story / Cards */
+    h2,h3{font-family:'Cormorant Garamond',serif;color:var(--ink)}
+    h2{font-size:clamp(26px,3.6vw,44px);margin:0 0 14px}
+    h3{font-size:clamp(22px,2.2vw,28px);margin:0 0 10px}
+    .accent{font-family:'Parisienne',cursive;font-size:clamp(24px,3vw,42px);color:var(--terracotta)}
+    .story-grid{display:grid;gap:24px}
+    @media(min-width:900px){.story-grid{grid-template-columns:1.2fr 1fr;align-items:center;gap:42px}}
+    .card{background:#fff;border:1px solid #efe9de;border-radius:var(--radius);box-shadow:var(--shadow);padding:22px}
+    .media{position:relative;overflow:hidden;border-radius:var(--radius);box-shadow:var(--shadow)}
+    .media img{width:100%;height:auto;display:block}
+    .pill{display:inline-block;border-radius:999px;border:1px solid var(--seafoam);padding:6px 12px;font-size:.9rem;color:var(--teal);background:#ffffffb3;margin-right:6px}
+
+    /* Dates */
+    .dates{background:linear-gradient(180deg,#fff,#f6f2ea)}
+    .dates-grid{display:grid;gap:22px}
+    @media(min-width:980px){.dates-grid{grid-template-columns:1.1fr .9fr;gap:32px}}
+    .map-card{position:relative;background:#fff;border:1px solid #eadfcd;border-radius:18px;padding:12px;box-shadow:var(--shadow)}
+    .map-embed{border-radius:14px;overflow:hidden;aspect-ratio:4/3;background:#e8f3f2}
+    .map-embed iframe{width:100%;height:100%;border:0;display:block}
+    .map-legend{position:absolute;left:14px;bottom:12px;background:#ffffffd8;border:1px solid #eadfcd;border-radius:12px;padding:6px 10px;font-size:.85rem;color:#2F4A4E}
+    .map-dot{display:inline-block;width:10px;height:10px;background:#A75A32;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1px #A75A32;margin-right:.4rem}
+
+    /* Travel / Stay */
+    .travel-grid{display:grid;gap:22px}
+    @media(min-width:900px){.travel-grid{grid-template-columns:repeat(3,1fr)}}
+    .tip{background:#fff;border:1px solid #efe9de;border-radius:var(--radius);padding:20px;box-shadow:var(--shadow)}
+
+    .stay-grid{display:grid;gap:22px}
+    @media(min-width:980px){.stay-grid{grid-template-columns:1.1fr .9fr;gap:28px}}
+    .stay-list{margin:0;padding-left:18px}
+    .stay-list li{margin:8px 0}
+
+    /* RSVP */
+    .rsvp{background:linear-gradient(180deg,#f6f2ea,#fff)}
+    form{display:grid;gap:14px;max-width:720px;margin:16px auto 0}
+    input,select,textarea{width:100%;border:1px solid #e5ded2;border-radius:12px;padding:14px;font:inherit;background:#fff;min-height:48px;font-size:16px}
+    .fieldset{border:1px dashed #eadfcd;border-radius:14px;padding:12px}
+    .fieldset legend{padding:0 6px;color:var(--terracotta);font-weight:600}
+    .hidden{display:none !important}
+
+    /* Gallery */
+    .gallery-grid{display:grid;grid-template-columns:1fr;gap:12px}
+    @media(min-width:800px){.gallery-grid{grid-template-columns:repeat(4,1fr);gap:14px}}
+    .gallery-grid img{width:100%;height:100%;object-fit:cover;border-radius:14px;box-shadow:var(--shadow)}
+
+    /* Footer */
+    footer{background:var(--teal);color:#eaf3f2;padding:50px 0;position:relative;overflow:hidden}
+    .footer-motif{position:absolute;inset:0;opacity:.08;background-image:radial-gradient(circle at 20% 10%,#fff 1px,transparent 2px),radial-gradient(circle at 80% 70%,#fff 1px,transparent 2px);background-size:120px 120px,160px 160px}
+
+    /* Reveal */
+    .reveal{opacity:0;transform:translateY(14px);transition:opacity .8s,transform .8s}
+    .reveal.visible{opacity:1;transform:translateY(0)}
+
+    /* Sunlight hover */
+    .sunlight{position:fixed;inset:0;pointer-events:none;z-index:5;mix-blend-mode:soft-light;background:
+      radial-gradient(420px 420px at var(--x,50%) var(--y,50%), rgba(230,182,85,.55), rgba(230,182,85,.18) 40%, rgba(230,182,85,0) 65%),
+      radial-gradient(800px 800px at var(--x,50%) var(--y,50%), rgba(255,255,220,.15), rgba(255,255,220,0) 50%);
+      transition:background .08s ease}
+    @media(prefers-reduced-motion:reduce){.sunlight{transition:none;display:none}}
+
+    /* Audio toggle */
+    .audio-toggle{position:fixed;right:14px;bottom:14px;z-index:1200;background:#fff;border:1px solid #e5ded2;border-radius:999px;padding:10px 14px;box-shadow:var(--shadow);display:flex;gap:.5rem;align-items:center}
+    .audio-toggle button{all:unset;cursor:pointer;font-weight:700;color:var(--terracotta)}
+    /* Mobile gold fish effect (mobile-only, touch-trigger) */
+    .goldfish{
+      position:fixed; left:0; top:0;
+      pointer-events:none;
+      z-index:9999;
+      width:82px; height:auto;          /* smaller + more realistic */
+      opacity:0;
+      transform:translate3d(var(--sx,0px), var(--sy,0px), 0) scale(var(--sc,1));
+      will-change: transform, opacity;
+      filter: drop-shadow(0 4px 10px rgba(0,0,0,.18));
+    }
+
+    .goldfish svg{ display:block; width:100%; height:auto; }
+    .goldfish .fish-wrap{
+      transform-origin: 50% 50%;
+      transform: scaleX(var(--flip, 1));
+    }
+    .goldfish .tail{
+      transform-origin: 12% 50%;
+      animation: fish-tail 220ms ease-in-out infinite;
+    }
+    .goldfish .fin{
+      transform-origin: 40% 50%;
+      animation: fish-fin 380ms ease-in-out infinite;
+      opacity: .85;
+    }
+
+    /* main swim: darts to the touch point, then bolts off-screen */
+    .goldfish.swimming{
+  animation:
+    fish-appear 120ms ease-out forwards,
+    fish-path var(--dur, 3200ms) cubic-bezier(.2,.8,.2,1) forwards,
+    fish-fade 280ms ease-in forwards;
+  animation-delay:
+    0ms,
+    70ms,
+    calc(var(--dur, 3200ms) - 260ms);
+}
+
+/* subtle up/down as it swims */
+    .goldfish.swimming .fish-wrap{
+      animation: fish-bob 520ms ease-in-out infinite;
+    }
+
+    @keyframes fish-appear{
+      from{ opacity:0; transform:translate3d(var(--sx), var(--sy), 0) scale(.92); }
+      to  { opacity:.98; transform:translate3d(var(--sx), var(--sy), 0) scale(1); }
+    }
+
+    /* keyframe path with a "curious dart" to the tap point, micro-pause, then escape */
+    @keyframes fish-path{
+      0%   { transform:translate3d(var(--sx), var(--sy), 0) scale(1); }
+      18%  { transform:translate3d(var(--mx), var(--my), 0) scale(1); }
+      24%  { transform:translate3d(var(--mx), var(--my), 0) scale(1); }
+      100% { transform:translate3d(var(--ex), var(--ey), 0) scale(.96); }
+    }
+
+    @keyframes fish-fade{
+      from{ opacity:.98; }
+      to  { opacity:0; }
+    }
+    @keyframes fish-bob{
+      0%   { transform:translate3d(0,0,0) rotate(-1deg); }
+      50%  { transform:translate3d(0,-8px,0) rotate(1deg); }
+      100% { transform:translate3d(0,0,0) rotate(-1deg); }
+    }
+    @keyframes fish-tail{
+      0%   { transform:rotate(10deg); }
+      50%  { transform:rotate(-14deg); }
+      100% { transform:rotate(10deg); }
+    }
+    @keyframes fish-fin{
+      0%   { transform:rotate(6deg); }
+      50%  { transform:rotate(-10deg); }
+      100% { transform:rotate(6deg); }
+    }
+
+    @media(min-width:768px){ .goldfish{ display:none } } /* mobile-only */
+    @media (prefers-reduced-motion: reduce){
+      .goldfish, .goldfish *{ animation:none !important; }
+    }
+  
+/* Visibility safeguard */
+section p,
+section ul,
+section ol,
+section li,
+section figure,
+section img,
+section .card,
+section .container {
+  display: block;
+  opacity: 1;
+  visibility: visible;
+}
+
+</style>
+
+  <!-- Event structured data -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Event",
+    "name": "Sam & Georgia — Wedding",
+    "startDate": "2026-09-10T14:00:00+02:00",
+    "endDate": "2026-09-10T20:00:00+02:00",
+    "eventStatus": "https://schema.org/EventScheduled",
+    "eventAttendanceMode": "https://schema.org/OfflineEventAttendanceMode",
+    "location": {
+      "@type": "Place",
+      "name": "Kantra Beach Club",
+      "address": "Triq Ta’ Ċenċ (by Mġarr ix-Xini), Sannat, Gozo"
+    },
+    "image": [
+      "https://upload.wikimedia.org/wikipedia/commons/e/e8/Ramla_Bay.jpg"
+    ],
+    "description": "Our Mediterranean wedding in Gozo: dates, travel, venue and RSVP."
+  }
+  </script>
+</head>
+<body>
+  <div class="sunlight" aria-hidden="true"></div>
+
+  <!-- Header / Nav -->
+  <header>
+    <div class="container nav" role="navigation" aria-label="Main navigation">
+      <a class="brand" href="#welcome" aria-label="Go to top">
+        <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2c5 0 9 4 9 9 0 6-9 11-9 11S3 17 3 11c0-5 4-9 9-9Zm0 3c-3.3 0-6 2.7-6 6 0 3.9 3.6 7.4 6 9 2.4-1.6 6-5.1 6-9 0-3.3-2.7-6-6-6Z"/></svg>
+        <span>Sam &amp; Georgia</span>
+      </a>
+      <button class="burger" aria-label="Open menu" aria-controls="menu" aria-expanded="false"><span></span></button>
+      
+    </div>
+  </header>
+
+  <!-- Hero -->
+  <main id="welcome" class="hero" role="main" aria-label="Welcome">
+    <p class="eyebrow">Gozo, Malta</p>
+    <h1 class="display">Sam &amp; Georgia</h1>
+    <p class="tagline"><em>Under the Gozo sun — warm seas, good food, and all our favourite people.</em></p>
+
+    <div class="countdown" aria-live="polite" aria-label="Countdown to our wedding">
+      <div class="unit"><div class="num" id="d">—</div><div class="lbl">days</div></div>
+      <div class="unit"><div class="num" id="h">—</div><div class="lbl">hours</div></div>
+      <div class="unit"><div class="num" id="m">—</div><div class="lbl">mins</div></div>
+      <div class="unit"><div class="num" id="s">—</div><div class="lbl">secs</div></div>
+    </div>
+
+    <div class="cta-row">
+      <a class="btn alt" href="#story">Discover our story</a>
+      <a class="btn" href="#rsvp">Join us under the Gozo sun</a>
+    </div>
+
+    <!-- Add-to-calendar quick link -->
+    <p style="margin-top:14px"><a id="ics" class="btn alt" download="sam-georgia-gozo.ics" href="#">Add to calendar</a></p>
+  </main>
+
+  <!-- Our Story -->
+  <section id="story" class="section" aria-labelledby="story-title">
+    <div class="container">
+      <h2 id="story-title">Our Story</h2>
+      <p class="accent">Our love story started here — and we're so excited to return.</p>
+      <div class="story-grid reveal">
+        <div class="card">
+          <h3>From Bristol to Gozo</h3>
+          <p><strong>How we met: </strong> We met at LeoVegas, G fell in love with Sam because he is an absolute unit and really cool.</p>
+          <p><strong>The engagement: Bare romance</strong> &ndash; we’ll fill this in soon.</p>
+          <div style="margin-top:10px">
+            <span class="pill">Golden beaches</span>
+            <span class="pill">Olive groves</span>
+            <span class="pill">Sunlit days</span>
+          </div>
+        </div>
+        <figure class="media">
+          <img loading="lazy" width="1280" height="853" src="assets/images/LeoVegas.jpeg" alt="A favourite moment from our travels">
+        </figure>
+      </div>
+      <div class="card reveal" style="margin-top:26px">
+        <h3>Moments that matter</h3>
+        <ol style="margin:0; padding-left:18px">
+          <li><strong>First meeting:</strong> (date coming soon)</li>
+          <li><strong>Engagement:</strong> (date coming soon)</li>
+          <li><strong>Wedding:</strong> <span id="timeline-wedding-date">10 September 2026</span></li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- Wedding Dates with Google Maps -->
+  <section id="dates" class="section dates" aria-labelledby="dates-title">
+    <div class="container">
+      <h2 id="dates-title">The Wedding Dates</h2>
+
+      <div class="dates-grid">
+        <!-- Left: details -->
+        <div class="card reveal">
+          <h3>Ceremony</h3>
+          <p>Details to follow — time and location for the vows will be shared here.</p>
+
+          <h3 style="margin-top:18px">Reception — Kantra Beach Club</h3>
+          <p>
+            Kantra Beach Club, Triq Ta’ Ċenċ (by Mġarr ix-Xini), Sannat, Gozo.
+            <a href="https://www.tripadvisor.co.uk/Restaurant_Review-g230154-d4400180-Reviews-Kantra_Beach_Club-Sannat_Island_of_Gozo.html" target="_blank" rel="noopener">Tripadvisor</a>
+          </p>
+
+          <hr style="border:0;height:1px;background:linear-gradient(90deg,transparent,var(--gold),transparent);margin:18px 0" />
+          <h3>Local highlights</h3>
+          <ul>
+            <li>Mġarr ix-Xini inlet — swim &amp; snorkel</li>
+            <li>Ramla Bay — red sand beach</li>
+            <li>Xlendi — sunsets &amp; seafront strolls</li>
+          </ul>
+
+          <p style="margin-top:14px">
+            <a class="btn alt" href="https://www.google.com/maps?q=36.017361,14.271833" target="_blank" rel="noopener">
+              View in Google Maps
+            </a>
+          </p>
+        </div>
+
+        <!-- Right: Google Maps widget -->
+        <div class="map-card reveal" aria-label="Google map of Kantra Beach Club, Gozo">
+          <div class="map-embed">
+            <iframe
+              loading="lazy"
+              allowfullscreen
+              referrerpolicy="no-referrer-when-downgrade"
+              src="https://www.google.com/maps?q=36.017361,14.271833&z=16&output=embed"
+              title="Kantra Beach Club location on Google Maps">
+            </iframe>
+          </div>
+          <div class="map-legend"><span class="map-dot"></span>Reception</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+    <!-- How to Get There -->
+  <section id="travel" class="section" aria-labelledby="travel-title">
+    <div class="container">
+      <h2 id="travel-title">How to Get There</h2>
+      <p class="accent">Three simple steps — fly to Malta, get to the right terminal, then hop over to Gozo.</p>
+
+      <div class="travel-grid">
+        <div class="tip reveal">
+          <h3>Step 1: Fly to Malta (MLA)</h3>
+          <ul class="stay-list">
+            <li>Book flights to <strong>Malta International Airport (MLA)</strong>.</li>
+            <li><strong>Car hire:</strong> hiring at the airport is the easiest way to explore Gozo (and it makes ferry travel straightforward).</li>
+            <li>If you’re not hiring a car, taxis and ride-hailing can get you into Valletta for the fast ferry.</li>
+          </ul>
+          <figure class="media" style="margin-top:14px">
+            <img loading="lazy" width="1280" height="853" src="assets/images/London.jpeg" alt="Travel moments together">
+          </figure>
+        </div>
+
+        <div class="tip reveal">
+          <h3>Step 2: Getting to the Ferry Terminals</h3>
+          <ul class="stay-list">
+            <li><strong>Option A — Car ferry terminal (Ċirkewwa):</strong> best if you have a hire car. Drive from the airport to Ċirkewwa and take the <em>Gozo Channel</em> car ferry.</li>
+            <li><strong>Option B — Valletta fast ferry:</strong> best if you’re travelling without a car. Head to Valletta and take the <em>Gozo Highspeed</em> passenger ferry.</li>
+            <li>Both options get you to Gozo — pick the one that fits your plans.</li>
+          </ul>
+          <figure class="media" style="margin-top:14px">
+            <img loading="lazy" width="1280" height="853" src="assets/images/Canada.jpeg" alt="A scenic travel photo">
+          </figure>
+        </div>
+
+        <div class="tip reveal">
+          <h3>Step 3: Ferry to Gozo (timetables)</h3>
+          <ul class="stay-list">
+            <li><strong>Car ferry (Ċirkewwa ↔ Mġarr):</strong> frequent sailings, ~25 minutes crossing.</li>
+            <li><strong>Fast ferry (Valletta ↔ Mġarr):</strong> passenger-only, typically ~45 minutes.</li>
+            <li>Check live times before you travel:</li>
+            <li>
+              <a href="https://www.gozochannel.com/ferry/schedule/" target="_blank" rel="noopener">Gozo Channel (car ferry) timetable</a>
+              &nbsp;•&nbsp;
+              <a href="https://gozohighspeed.com/pages/schedule" target="_blank" rel="noopener">Gozo Highspeed (fast ferry) timetable</a>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  
+  <!-- Getting Around -->
+  <section id="getting-around" class="section" aria-labelledby="around-title">
+    <div class="container">
+      <h2 id="around-title">Getting Around Gozo</h2>
+      <p class="accent">Gozo is small — you’re never far from the good stuff.</p>
+
+      <div class="stay-grid">
+        <div class="card reveal">
+          <h3>Best option: car hire</h3>
+          <ul class="stay-list">
+            <li>Most flexible for beaches, dinner plans, and exploring.</li>
+            <li>Driving is relaxed and distances are short.</li>
+          </ul>
+
+          <h3 style="margin-top:12px">Also works well</h3>
+          <ul class="stay-list">
+            <li><strong>Taxis / ride-hailing:</strong> local taxis and ride-hailing in Malta can help for airport/Valletta legs.</li>
+            <li><strong>Buses:</strong> inexpensive routes between towns (allow extra time).</li>
+          </ul>
+        </div>
+
+        <figure class="media reveal" style="margin:0">
+          <img loading="lazy" width="1280" height="853" src="assets/images/Kayak.jpeg" alt="On the water in the sun">
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- Weather -->
+  <section id="weather" class="section" aria-labelledby="weather-title">
+    <div class="container">
+      <h2 id="weather-title">Weather in Early September</h2>
+      <p class="accent">Typically warm days and balmy evenings — perfect for long dinners.</p>
+
+      <div class="stay-grid">
+        <div class="card reveal">
+          <ul class="stay-list">
+            <li>Bring light layers for evenings by the sea.</li>
+            <li>Sun protection is a must (hat + SPF).</li>
+            <li>Pack a light rain layer just in case.</li>
+          </ul>
+          <p style="margin-top:10px">We’ll share a quick forecast snapshot closer to the date.</p>
+        </div>
+
+        <figure class="media reveal" style="margin:0">
+          <img loading="lazy" width="1280" height="853" src="assets/images/Winter%20Wonderland.jpeg" alt="A playful contrast: definitely not the Gozo forecast">
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- Attire -->
+  <section id="attire" class="section" aria-labelledby="attire-title">
+    <div class="container">
+      <h2 id="attire-title">Wedding Attire</h2>
+      <p class="accent">Smart, comfortable, and summer-friendly.</p>
+
+      <div class="stay-grid">
+        <div class="card reveal">
+          <h3>Guidance</h3>
+          <ul class="stay-list">
+            <li><strong>Ceremony:</strong> smart summer wedding attire.</li>
+            <li><strong>Footwear:</strong> Gozo is charmingly uneven in places — block heels, wedges, or smart flats work best.</li>
+            <li><strong>Evening:</strong> a light layer is handy once the sun dips.</li>
+          </ul>
+        </div>
+
+        <figure class="media reveal" style="margin:0">
+          <img loading="lazy" width="1280" height="853" src="assets/images/Proposal.jpeg" alt="A special moment together">
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- Bonus Tips -->
+  <section id="tips" class="section" aria-labelledby="tips-title">
+    <div class="container">
+      <h2 id="tips-title">Bonus Tips</h2>
+      <p class="accent">A few small things that make the trip smoother.</p>
+
+      <div class="stay-grid">
+        <div class="card reveal">
+          <ul class="stay-list">
+            <li><strong>Cash:</strong> cards are common, but a little cash is useful for small spots.</li>
+            <li><strong>Plug:</strong> Malta uses the UK 3‑pin plug.</li>
+            <li><strong>Timing:</strong> build in a buffer for airport + ferry connections.</li>
+            <li><strong>Explore:</strong> schedule one “no plans” afternoon — Gozo is best when you wander.</li>
+          </ul>
+        </div>
+
+        <figure class="media reveal" style="margin:0">
+          <img loading="lazy" width="1280" height="853" src="assets/images/Victoria.jpeg" alt="Victoria, Gozo vibes">
+        </figure>
+      </div>
+    </div>
+  </section>
+  <!-- Where to Stay -->
+  <section id="stay" class="section" aria-labelledby="stay-title">
+    <div class="container">
+      <h2 id="stay-title">🌿 Where to Stay on Gozo</h2>
+      <p class="accent">Short distances, big views — pick the vibe you want and everything is a quick drive away.</p>
+
+      <div class="stay-grid">
+        <div class="card reveal">
+          <h3>Choose an area</h3>
+          <div style="display:grid; gap:14px; margin-top:10px">
+            <div class="card" style="padding:16px">
+              <h4 style="margin:0 0 6px">Victoria (Rabat)</h4>
+              <p style="margin:0">The island’s lively hub — cafés, shops, and the easiest base for getting around.</p>
+            </div>
+            <div class="card" style="padding:16px">
+              <h4 style="margin:0 0 6px">Xlendi or Marsalforn</h4>
+              <p style="margin:0">Seaside villages with promenades, swimming spots, and plenty of restaurants.</p>
+            </div>
+            <div class="card" style="padding:16px">
+              <h4 style="margin:0 0 6px">Għarb / San Lawrenz</h4>
+              <p style="margin:0">Quiet countryside, stone farmhouses, wide skies — perfect for a slower pace.</p>
+            </div>
+          </div>
+
+          <h3 style="margin-top:14px">Accommodation style</h3>
+          <ul class="stay-list">
+            <li><strong>Boutique hotels:</strong> easy, service-led stays.</li>
+            <li><strong>Farmhouses with pools:</strong> brilliant for groups and families.</li>
+            <li><strong>Apartments:</strong> flexible, often with sea views.</li>
+          </ul>
+        </div>
+
+        <div class="card reveal">
+          <h3>Handy picks (ideas)</h3>
+          <ul class="stay-list">
+            <li><strong>Hotel Ta’ Ċenċ &amp; Spa:</strong> peaceful, elevated setting with spa facilities.</li>
+            <li><strong>Kempinski Hotel San Lawrenz:</strong> resort-style comfort in the west of the island.</li>
+            <li><strong>Boutique stays in Victoria:</strong> great if you want to walk to cafés and bars.</li>
+            <li><strong>Farmhouses near Għarb:</strong> ideal for groups wanting a shared base.</li>
+          </ul>
+          <p style="margin-top:10px">If you tell us what vibe you want (quiet vs lively, hotel vs farmhouse), we’ll happily suggest a few options.</p>
+
+          <figure class="media" style="margin-top:14px">
+            <img loading="lazy" width="1280" height="853" src="assets/images/Canada.jpeg" alt="Gozo travel vibes">
+          </figure>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+    <!-- RSVP -->
+  <section id="rsvp" class="section rsvp" aria-labelledby="rsvp-title">
+    <div class="container">
+      <h2 id="rsvp-title">RSVP</h2>
+      <p class="accent">One quick form and you’re done.</p>
+
+      <div class="card reveal" style="max-width:720px;margin:0 auto;text-align:center">
+        <p style="margin:0 0 14px">Please RSVP via our Google Form so we can confirm numbers and meal choices.</p>
+        <a class="btn" id="googleFormBtn" href="https://forms.gle/REPLACE_ME" target="_blank" rel="noopener">Open RSVP Form</a>
+        <p style="margin:10px 0 0; font-size:.95rem; opacity:.9">If the link doesn’t work for you, message us and we’ll sort it.</p>
+      </div>
+    </div>
+  </section>
+
+
+  
+  <!-- Footer -->
+  <footer role="contentinfo">
+    <div class="footer-motif" aria-hidden="true"></div>
+    <div class="container footer-inner">
+      <p style="text-align:center;margin:0;font-family:'Cormorant Garamond',serif;font-size:1.2rem">With love from Gozo · <span style="color:var(--gold)">☼</span> · See you on our island</p>
+      <p style="text-align:center;margin:8px 0 0;font-size:.85rem;opacity:.8">Images: Dwejra Inland Sea; Mġarr Harbour; Ramla Bay; Xlendi Bay — via Wikimedia Commons.</p>
+    </div>
+  </footer>
+
+  <!-- Waves audio element -->
+  <audio id="waves" playsinline loop muted preload="auto"></audio>
+
+  <div class="audio-toggle" role="region" aria-label="Audio controls">
+    <span>Waves</span>
+    <button id="audioBtn" type="button" aria-pressed="false" aria-controls="waves">Sound off</button>
   </div>
-  <label>API base URL</label>
-  <input name="base_url" placeholder="https://api.mews-demo.com/api/connector/v1" value="https://api.mews-demo.com/api/connector/v1">
-  <div style="margin-top:14px"><button class="btn" type="submit">Generate PDF</button></div>
-</form>
-</div></div></body></html>
-"""
 
-app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "mews-audit-secret")
-CORS(app, resources={r"/*": {"origins": "*"}})
+  <script>
+(() => {
+  const $ = (s, r=document) => r.querySelector(s);
+  const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
 
+  // Reveal on scroll (keeps images/maps/cards visible once in view)
+  const reveals = $$('.reveal');
+  if ('IntersectionObserver' in window) {
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting) {
+          e.target.classList.add('visible');
+          io.unobserve(e.target);
+        }
+      });
+    }, { threshold: 0.12 });
+    reveals.forEach(el => io.observe(el));
+  } else {
+    reveals.forEach(el => el.classList.add('visible'));
+  }
 
-@app.get("/")
-def home():
-    return render_template_string(HTML)
+  // Countdown
+  const elD = $('#d'), elH = $('#h'), elM = $('#m'), elS = $('#s');
+  // Update this if needed:
+  const WEDDING_ISO = '2026-09-10T14:00:00+02:00';
+  const target = new Date(WEDDING_ISO).getTime();
 
+  function pad(n){ return String(n).padStart(2,'0'); }
 
-def _extract_param(name: str) -> Optional[str]:
-    if request.is_json:
-        v = (request.json or {}).get(name)
-        return v.strip() if isinstance(v, str) else v
-    v = request.form.get(name) if request.form else None
-    return v.strip() if isinstance(v, str) else v
+  function tick(){
+    if (!elD || !elH || !elM || !elS) return;
+    const now = Date.now();
+    let diff = target - now;
 
+    if (!Number.isFinite(diff)) {
+      elD.textContent = elH.textContent = elM.textContent = elS.textContent = '—';
+      return;
+    }
 
-@app.post("/audit")
-def audit():
-    try:
-        ct = _extract_param("client_token")
-        at = _extract_param("access_token")
-        base_url = _extract_param("base_url") or DEFAULT_API_BASE
+    if (diff <= 0) {
+      elD.textContent = '0';
+      elH.textContent = '00';
+      elM.textContent = '00';
+      elS.textContent = '00';
+      return;
+    }
 
-        if not ct or not at:
-            return jsonify({"ok": False, "error": "Missing client_token or access_token"}), 400
+    const sec = Math.floor(diff / 1000);
+    const days = Math.floor(sec / 86400);
+    const hours = Math.floor((sec % 86400) / 3600);
+    const mins = Math.floor((sec % 3600) / 60);
+    const secs = sec % 60;
 
-        data = collect_data(base_url, ct, at, DEFAULT_CLIENT_NAME)
-        report = build_report(data, base_url, DEFAULT_CLIENT_NAME)
-        pdf = build_pdf(report)
+    elD.textContent = String(days);
+    elH.textContent = pad(hours);
+    elM.textContent = pad(mins);
+    elS.textContent = pad(secs);
+  }
+  tick();
+  setInterval(tick, 1000);
 
-        from io import BytesIO
-        bio = BytesIO(pdf)
-        bio.seek(0)
-        fn = f"mews-audit-{report.enterprise_id or 'enterprise'}-{utc_now().strftime('%Y%m%d-%H%M%S')}.pdf"
-        return send_file(bio, mimetype="application/pdf", as_attachment=True, download_name=fn)
+  // Mobile waves audio (safe, non-blocking)
+  const btn = $('#soundToggle');
+  const audio = $('#wavesAudio');
+  if (btn && audio) {
+    let audible = false;
 
-    except Exception as e:
-        err = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-        print("AUDIT ERROR")
-        print(err)
-        return jsonify({"ok": False, "error": str(e), "trace": err}), 500
+    function updateBtn() {
+      btn.textContent = audible ? 'Sound on' : 'Sound off';
+      btn.setAttribute('aria-pressed', audible ? 'true' : 'false');
+    }
+    updateBtn();
 
+    async function enableSound(){
+      if (audible) return;
+      try {
+        audio.muted = false;
+        audio.volume = 0.35;
+        await audio.play();
+        audible = true;
+        updateBtn();
+      } catch {}
+    }
 
-@app.get("/health")
-def health():
-    return jsonify({"ok": True, "ts": utc_now().isoformat(), "base": DEFAULT_API_BASE})
+    btn.addEventListener('click', async () => {
+      if (!audible) return enableSound();
+      if (!audio.paused) {
+        audio.pause();
+        audible = false;
+        updateBtn();
+      } else {
+        await enableSound();
+      }
+    });
 
+    ['pointerdown','touchstart','click','keydown']
+      .forEach(ev => window.addEventListener(ev, enableSound, { once:true, passive:true }));
+  }
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
+  // Mobile gold fish: darts towards your tap, then bolts away LEFT (slower)
+  const goldFishSVG = `
+  <svg viewBox="0 0 160 96" aria-hidden="true">
+    <defs>
+      <linearGradient id="goldBody" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0%" stop-color="#E6B655"/><stop offset="100%" stop-color="#D6A248"/>
+      </linearGradient>
+    </defs>
+
+    <g class="fish-wrap">
+      <ellipse cx="78" cy="48" rx="46" ry="26" fill="url(#goldBody)"/>
+      <g class="tail">
+        <path d="M112 48 L152 72 Q145 48 152 24 Z" fill="#E6B655"/>
+      </g>
+      <path class="fin" d="M68 34 Q84 18 98 30 L84 40 Z" fill="#E6B655"/>
+      <path class="fin" d="M68 62 Q84 78 98 66 L84 56 Z" fill="#E6B655"/>
+      <circle cx="58" cy="44" r="6" fill="#fff"/><circle cx="59" cy="44" r="3" fill="#243133"/>
+      <path d="M50 54 q8 6 16 0" stroke="#A75A32" stroke-width="3" fill="none" stroke-linecap="round"/>
+    </g>
+  </svg>`;
+
+  let fishEl = null;
+  let lastFishAt = 0;
+
+  function isMobile(){
+    return window.matchMedia('(max-width: 767.98px)').matches ||
+           window.matchMedia('(pointer: coarse)').matches;
+  }
+
+  function ensureFish(){
+    if (!fishEl){
+      fishEl = document.createElement('div');
+      fishEl.className = 'goldfish';
+      fishEl.innerHTML = goldFishSVG;
+      document.body.appendChild(fishEl);
+
+      fishEl.addEventListener('animationend', (e) => {
+        if (e.animationName === 'fish-fade'){
+          fishEl.classList.remove('swimming');
+          fishEl.style.opacity = '0';
+        }
+      });
+    }
+    return fishEl;
+  }
+
+  function shouldIgnoreTarget(target){
+    return !!target?.closest?.('a, button, input, select, textarea, label');
+  }
+
+  function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
+
+  function launchFish(x, y){
+    if (!isMobile()) return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+    const now = performance.now();
+    if (now - lastFishAt < 800) return; // anti-spam
+    lastFishAt = now;
+
+    const el = ensureFish();
+
+    // Fish is smaller; centre around the tap
+    const midX = x - 40;
+    const midY = y - 28;
+
+    // Start off-screen right so it "darts in" towards the tap
+    const startX = window.innerWidth + 120;
+    const startY = clamp(midY + (Math.random()*120 - 60), 20, window.innerHeight - 80);
+
+    // Escape off-screen left with slight vertical drift
+    const endX = -220;
+    const endY = clamp(midY + (Math.random()*140 - 70), 20, window.innerHeight - 80);
+
+    const dur = 2800 + Math.floor(Math.random() * 1600); // 2800–4400ms (slower)
+
+    el.style.setProperty('--sx', `${startX}px`);
+    el.style.setProperty('--sy', `${startY}px`);
+    el.style.setProperty('--mx', `${midX}px`);
+    el.style.setProperty('--my', `${midY}px`);
+    el.style.setProperty('--ex', `${endX}px`);
+    el.style.setProperty('--ey', `${endY}px`);
+    el.style.setProperty('--dur', `${dur}ms`);
+    el.style.setProperty('--flip', '-1'); // face left
+
+    el.classList.remove('swimming');
+    el.style.animation = 'none';
+    void el.offsetWidth; // reflow
+    el.style.animation = '';
+    el.classList.add('swimming');
+  }
+
+  ['pointerdown','touchstart'].forEach(ev=>{
+    window.addEventListener(ev, (e)=>{
+      if (shouldIgnoreTarget(e.target)) return;
+      const pt = e.touches ? e.touches[0] : e;
+      launchFish(pt.clientX, pt.clientY);
+    }, { passive:true });
+  });
+
+})();
+</script>
+</body>
+</html>
