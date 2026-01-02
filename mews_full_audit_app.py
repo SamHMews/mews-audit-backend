@@ -1037,12 +1037,25 @@ def build_pdf(report: AuditReport) -> bytes:
             return "<font color='#7c3aed'><b>NEEDS INPUT</b></font>"
         return f"<font color='#64748b'><b>{esc(st)}</b></font>"
 
+    # Standard table width (use the widest table: Rates)
+    STANDARD_TABLE_WIDTH = sum([44*mm, 34*mm, 38*mm, 44*mm, 18*mm, 18*mm])
+
     def make_long_table(header: List[str], rows: List[List[Any]], col_widths: List[float]) -> LongTable:
         data: List[List[Any]] = [[P(h, "SmallX") for h in header]]
         for r in rows:
             data.append([c if isinstance(c, Paragraph) else P(c, "TinyX") for c in r])
+        # Scale all tables to a consistent width for alignment/scanability
+        try:
+            total_w = float(sum(col_widths)) if col_widths else 0.0
+            target_w = float(STANDARD_TABLE_WIDTH)
+            if total_w > 0 and target_w > 0:
+                scale = target_w / total_w
+                col_widths = [w * scale for w in col_widths]
+        except Exception:
+            pass
 
         t = LongTable(data, colWidths=col_widths, repeatRows=1)
+        t.hAlign = "LEFT"
 
         id_cols = set()
         for i, h in enumerate(header):
@@ -1067,7 +1080,7 @@ def build_pdf(report: AuditReport) -> bytes:
 
         for i in range(1, len(data)):
             if i % 2 == 0:
-                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#FCEFFB"))
+                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#EFEFFF"))
 
         t.setStyle(ts)
         return t
@@ -1105,10 +1118,10 @@ def build_pdf(report: AuditReport) -> bytes:
         # Title on the left
         canvas.setFont("Manrope-Semibold", 12.5)
         canvas.drawString(16 * mm, title_y, "Mews Configuration Audit Report")
-
-        # Page number to the left of the logo box (so it never overlaps)
+        # Page number at the bottom (centred)
         canvas.setFont("Inter", 8.5)
-        canvas.drawRightString(x_logo - 3 * mm, title_y, f"Page {doc_.page}")
+        bottom_y = 10 * mm
+        canvas.drawCentredString(A4[0] / 2.0, bottom_y, f"Page {doc_.page}")
 
         canvas.restoreState()
 
@@ -1200,7 +1213,7 @@ def build_pdf(report: AuditReport) -> bytes:
                     "Rate groups",
                     ["Rate group", "Rate group ID", "Activity state"],
                     details.get("RateGroupsTable") or [],
-                    [86*mm, 58*mm, 32*mm],
+                    [64*mm, 80*mm, 32*mm],
                 )
 
             if "RatesTable" in details:
