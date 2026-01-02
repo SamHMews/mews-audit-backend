@@ -1046,80 +1046,6 @@ def build_pdf(report: AuditReport) -> bytes:
         showBoundary=0,
     )
 
-    pt_first = PageTemplate(id="First", frames=[frame_first], onPage=header_footer)
-    pt_later = PageTemplate(id="Later", frames=[frame_later], onPage=header_footer)
-    doc.addPageTemplates([pt_first, pt_later])
-
-    def P(text: Any, style: str = "TinyX") -> Paragraph:
-        return Paragraph(esc(text), styles[style])
-
-    def safe_para(text: str, style_name: str) -> Paragraph:
-        try:
-            return Paragraph(text, styles[style_name])
-        except Exception:
-            plain = text.replace("<", "&lt;").replace(">", "&gt;")
-            return Paragraph(plain, styles[style_name])
-
-    def badge(status: str) -> str:
-        st = (status or "").upper()
-        if st == "PASS":
-            return "<font color='#16a34a'><b>PASS</b></font>"
-        if st == "WARN":
-            return "<font color='#f59e0b'><b>WARN</b></font>"
-        if st == "FAIL":
-            return "<font color='#dc2626'><b>FAIL</b></font>"
-        if st == "NEEDS_INPUT":
-            return "<font color='#7c3aed'><b>NEEDS INPUT</b></font>"
-        return f"<font color='#64748b'><b>{esc(st)}</b></font>"
-
-    # Standard table width (use the widest table: Rates)
-    STANDARD_TABLE_WIDTH = sum([44*mm, 34*mm, 38*mm, 44*mm, 18*mm, 18*mm])
-
-    def make_long_table(header: List[str], rows: List[List[Any]], col_widths: List[float]) -> LongTable:
-        data: List[List[Any]] = [[P(h, "SmallX") for h in header]]
-        for r in rows:
-            data.append([c if isinstance(c, Paragraph) else P(c, "TinyX") for c in r])
-        # Scale all tables to a consistent width for alignment/scanability
-        try:
-            total_w = float(sum(col_widths)) if col_widths else 0.0
-            target_w = float(STANDARD_TABLE_WIDTH)
-            if total_w > 0 and target_w > 0:
-                scale = target_w / total_w
-                col_widths = [w * scale for w in col_widths]
-        except Exception:
-            pass
-
-        t = LongTable(data, colWidths=col_widths, repeatRows=1)
-        t.hAlign = "LEFT"
-
-        id_cols = set()
-        for i, h in enumerate(header):
-            hl = (h or "").lower()
-            if "id" in hl or "uuid" in hl:
-                id_cols.add(i)
-
-        ts = TableStyle([
-            ("FONTNAME", (0, 0), (-1, -1), "Inter"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F7BCF1")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1C1D24")),
-            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cbd5e1")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 4),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ])
-        for ci in sorted(id_cols):
-            ts.add("FONTSIZE", (ci, 1), (ci, -1), 6.8)
-
-        for i in range(1, len(data)):
-            if i % 2 == 0:
-                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#EFEFFF"))
-
-        t.setStyle(ts)
-        return t
-
     def header_footer(canvas, doc_):
         canvas.saveState()
 
@@ -1350,6 +1276,81 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 
 @app.get("/")
+
+    pt_first = PageTemplate(id="First", frames=[frame_first], onPage=header_footer)
+    pt_later = PageTemplate(id="Later", frames=[frame_later], onPage=header_footer)
+    doc.addPageTemplates([pt_first, pt_later])
+
+    def P(text: Any, style: str = "TinyX") -> Paragraph:
+        return Paragraph(esc(text), styles[style])
+
+    def safe_para(text: str, style_name: str) -> Paragraph:
+        try:
+            return Paragraph(text, styles[style_name])
+        except Exception:
+            plain = text.replace("<", "&lt;").replace(">", "&gt;")
+            return Paragraph(plain, styles[style_name])
+
+    def badge(status: str) -> str:
+        st = (status or "").upper()
+        if st == "PASS":
+            return "<font color='#16a34a'><b>PASS</b></font>"
+        if st == "WARN":
+            return "<font color='#f59e0b'><b>WARN</b></font>"
+        if st == "FAIL":
+            return "<font color='#dc2626'><b>FAIL</b></font>"
+        if st == "NEEDS_INPUT":
+            return "<font color='#7c3aed'><b>NEEDS INPUT</b></font>"
+        return f"<font color='#64748b'><b>{esc(st)}</b></font>"
+
+    # Standard table width (use the widest table: Rates)
+    STANDARD_TABLE_WIDTH = sum([44*mm, 34*mm, 38*mm, 44*mm, 18*mm, 18*mm])
+
+    def make_long_table(header: List[str], rows: List[List[Any]], col_widths: List[float]) -> LongTable:
+        data: List[List[Any]] = [[P(h, "SmallX") for h in header]]
+        for r in rows:
+            data.append([c if isinstance(c, Paragraph) else P(c, "TinyX") for c in r])
+        # Scale all tables to a consistent width for alignment/scanability
+        try:
+            total_w = float(sum(col_widths)) if col_widths else 0.0
+            target_w = float(STANDARD_TABLE_WIDTH)
+            if total_w > 0 and target_w > 0:
+                scale = target_w / total_w
+                col_widths = [w * scale for w in col_widths]
+        except Exception:
+            pass
+
+        t = LongTable(data, colWidths=col_widths, repeatRows=1)
+        t.hAlign = "LEFT"
+
+        id_cols = set()
+        for i, h in enumerate(header):
+            hl = (h or "").lower()
+            if "id" in hl or "uuid" in hl:
+                id_cols.add(i)
+
+        ts = TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), "Inter"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F7BCF1")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1C1D24")),
+            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cbd5e1")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ])
+        for ci in sorted(id_cols):
+            ts.add("FONTSIZE", (ci, 1), (ci, -1), 6.8)
+
+        for i in range(1, len(data)):
+            if i % 2 == 0:
+                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#EFEFFF"))
+
+        t.setStyle(ts)
+        return t
+
 def home():
     return render_template_string(HTML)
 
