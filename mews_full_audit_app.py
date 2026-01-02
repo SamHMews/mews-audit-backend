@@ -884,7 +884,9 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
 
     pay_items: List[CheckItem] = []
     st_pay, err_pay = status_for(["payments_getall", "payments_origin_charged_6m_w1", "payments_origin_charged_6m_w2", "payments_origin_failed_6m_w1", "payments_origin_failed_6m_w2"], "PASS")
-    s = f"Payments (30d sample)={len(payments)} | 6m Charged origins={len(payment_origin_counts_charged_6m)} | 6m Failed/Cancelled origins={len(payment_origin_counts_failed_6m)}"
+    payment_origin_counts_charged_6m = payment_origin_counts_charged_6m if "payment_origin_counts_charged_6m" in locals() else {}
+        payment_origin_counts_failed_6m = payment_origin_counts_failed_6m if "payment_origin_counts_failed_6m" in locals() else {}
+        s = f"Payments (30d sample)={len(payments)} | 6m Charged origins={len(payment_origin_counts_charged_6m)} | 6m Failed/Cancelled origins={len(payment_origin_counts_failed_6m)}"
     if err_pay:
         s += f" | {err_pay}"
     pay_items.append(CheckItem(
