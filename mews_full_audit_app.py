@@ -781,7 +781,7 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
     if err_cfg:
         legal_items.append(CheckItem("Configuration retrieval", "NEEDS_INPUT", err_cfg, "Connector: Configuration/Get", "Confirm API base URL and tokens; ensure Connector API is accessible.", {}, "High"))
 
-    sections.append(("Legal & property baseline", legal_items))
+    sections.append(("Legal & property baseline x", legal_items))
 
     accounting_items: List[CheckItem] = []
     st_ac, err_ac = status_for(["accounting_categories_getall"], "PASS" if accounting_categories else "WARN")
