@@ -3,7 +3,7 @@
 # Start command: gunicorn mews_full_audit_app:app
 # =========================================================
 #
-# v6 changes (per Sam's requirements):
+# v6 changes (per Sam's requirements) :
 # - NEEDS_INPUT: Any section where required API calls failed is marked NEEDS_INPUT (and error surfaced)
 # - Product mapping Tax %: uses configured taxation rate (via Taxations/GetAll) when available
 # - Logo: defaults to Mews SVG logo URL if LOGO_URL env var is not set
