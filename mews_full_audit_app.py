@@ -27,7 +27,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.enums import TA_CENTER
-from reportlab.platypus import SimpleDocTemplate, BaseDocTemplate, Frame, PageTemplate, NextPageTemplate, Paragraph, Spacer, PageBreak, KeepTogether
+from reportlab.platypus import BaseDocTemplate, Frame, PageTemplate, NextPageTemplate, Paragraph, Spacer, PageBreak, KeepTogether
 from reportlab.platypus.tables import LongTable, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
@@ -953,56 +953,21 @@ def build_pdf(report: AuditReport) -> bytes:
     pdfmetrics.registerFont(TTFont("Manrope-Semibold", os.path.join(FONT_DIR, "Manrope-SemiBold.ttf")))
 
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(
-        name="TitleX",
-        parent=styles["Title"],
-        fontName="Manrope-Semibold",
-        fontSize=20,
-        leading=24,
-        alignment=TA_CENTER,
-        spaceAfter=10,
-        textColor=colors.HexColor("#1C1D24"),
-    ))
-
-    styles.add(ParagraphStyle(
-        name="H1X",
-        parent=styles["Heading1"],
-        fontName="Manrope-Semibold",
-        fontSize=15,
-        leading=18,
-        spaceBefore=10,
-        spaceAfter=6,
-        textColor=colors.HexColor("#1C1D24"),
-    ))
-
-    styles.add(ParagraphStyle(
-        name="BodyX",
-        parent=styles["BodyText"],
-        fontName="Inter",
-        fontSize=9.6,
-        leading=12,
-        textColor=colors.HexColor("#1C1D24"),
-    ))
-
-    styles.add(ParagraphStyle(
-        name="SmallX",
-        parent=styles["BodyText"],
-        fontName="Inter",
-        fontSize=8.6,
-        leading=11,
-        textColor=colors.HexColor("#1C1D24"),
-    ))
-
-    styles.add(ParagraphStyle(
-        name="TinyX",
-        parent=styles["BodyText"],
-        fontName="Inter",
-        fontSize=8.1,
-        leading=10,
-        textColor=colors.HexColor("#1C1D24"),
-    ))
+    styles.add(ParagraphStyle(name="TitleX", parent=styles["Title"], fontName="Manrope-Semibold", fontSize=20, leading=24, alignment=TA_CENTER, spaceAfter=10, textColor=colors.HexColor("#1C1D24")))
+    styles.add(ParagraphStyle(name="H1X", parent=styles["Heading1"], fontName="Manrope-Semibold", fontSize=15, leading=18, spaceBefore=10, spaceAfter=6, textColor=colors.HexColor("#1C1D24")))
+    styles.add(ParagraphStyle(name="BodyX", parent=styles["BodyText"], fontName="Inter", fontSize=9.6, leading=12, textColor=colors.HexColor("#1C1D24")))
+    styles.add(ParagraphStyle(name="SmallX", parent=styles["BodyText"], fontName="Inter", fontSize=8.6, leading=11, textColor=colors.HexColor("#1C1D24")))
+    styles.add(ParagraphStyle(name="TinyX", parent=styles["BodyText"], fontName="Inter", fontSize=8.1, leading=10, textColor=colors.HexColor("#1C1D24")))
 
     logo = fetch_logo()
+
+        # --- Document + frames (Page 1 default margins; Pages 2+ left margin reduced by 50%) ---
+    PAGE_W, PAGE_H = A4
+    LEFT_FIRST = 16 * mm
+    LEFT_LATER = LEFT_FIRST * 0.5
+    RIGHT = 16 * mm
+    TOP = 18 * mm
+    BOTTOM = 16 * mm
 
     doc = BaseDocTemplate(
         buf,
@@ -1011,40 +976,77 @@ def build_pdf(report: AuditReport) -> bytes:
         author="Mews Audit Tool",
     )
 
-    # Page 1: original margins
-    left_1 = 16 * mm
-    right = 16 * mm
-    top = 18 * mm
-    bottom = 16 * mm
+    frame_first = Frame(LEFT_FIRST, BOTTOM, PAGE_W - LEFT_FIRST - RIGHT, PAGE_H - TOP - BOTTOM, id="F_FIRST")
+    frame_later = Frame(LEFT_LATER, BOTTOM, PAGE_W - LEFT_LATER - RIGHT, PAGE_H - TOP - BOTTOM, id="F_LATER")
 
-    # Pages 2+: reduce LEFT margin by 50% (right/top/bottom unchanged)
-    left_later = left_1 * 0.5
+    def P(text: Any, style: str = "TinyX") -> Paragraph:
+        return Paragraph(esc(text), styles[style])
 
-    frame_first = Frame(
-        left_1,
-        bottom,
-        A4[0] - left_1 - right,
-        A4[1] - top - bottom,
-        id="frame_first",
-        leftPadding=0,
-        rightPadding=0,
-        topPadding=0,
-        bottomPadding=0,
-        showBoundary=0,
-    )
+    def safe_para(text: str, style_name: str) -> Paragraph:
+        try:
+            return Paragraph(text, styles[style_name])
+        except Exception:
+            plain = text.replace("<", "&lt;").replace(">", "&gt;")
+            return Paragraph(plain, styles[style_name])
 
-    frame_later = Frame(
-        left_later,
-        bottom,
-        A4[0] - left_later - right,
-        A4[1] - top - bottom,
-        id="frame_later",
-        leftPadding=0,
-        rightPadding=0,
-        topPadding=0,
-        bottomPadding=0,
-        showBoundary=0,
-    )
+    def badge(status: str) -> str:
+        st = (status or "").upper()
+        if st == "PASS":
+            return "<font color='#16a34a'><b>PASS</b></font>"
+        if st == "WARN":
+            return "<font color='#f59e0b'><b>WARN</b></font>"
+        if st == "FAIL":
+            return "<font color='#dc2626'><b>FAIL</b></font>"
+        if st == "NEEDS_INPUT":
+            return "<font color='#7c3aed'><b>NEEDS INPUT</b></font>"
+        return f"<font color='#64748b'><b>{esc(st)}</b></font>"
+
+    STANDARD_TABLE_WIDTH = sum([44*mm, 34*mm, 38*mm, 44*mm, 18*mm, 18*mm])
+
+    def make_long_table(header: List[str], rows: List[List[Any]], col_widths: List[float]) -> LongTable:
+        data: List[List[Any]] = [[P(h, "SmallX") for h in header]]
+        for r in rows:
+            data.append([c if isinstance(c, Paragraph) else P(c, "TinyX") for c in r])
+        # Scale all tables to a consistent width for alignment/scanability
+        try:
+            total_w = float(sum(col_widths)) if col_widths else 0.0
+            target_w = float(STANDARD_TABLE_WIDTH)
+            if total_w > 0 and target_w > 0:
+                scale = target_w / total_w
+                col_widths = [w * scale for w in col_widths]
+        except Exception:
+            pass
+
+        t = LongTable(data, colWidths=col_widths, repeatRows=1)
+        t.hAlign = "LEFT"
+
+        id_cols = set()
+        for i, h in enumerate(header):
+            hl = (h or "").lower()
+            if "id" in hl or "uuid" in hl:
+                id_cols.add(i)
+
+        ts = TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), "Inter"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F7BCF1")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1C1D24")),
+            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cbd5e1")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ])
+        for ci in sorted(id_cols):
+            ts.add("FONTSIZE", (ci, 1), (ci, -1), 6.8)
+
+        for i in range(1, len(data)):
+            if i % 2 == 0:
+                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#EFEFFF"))
+
+        t.setStyle(ts)
+        return t
 
     def header_footer(canvas, doc_):
         canvas.saveState()
@@ -1052,15 +1054,15 @@ def build_pdf(report: AuditReport) -> bytes:
         top_y = A4[1] - 10 * mm  # near top margin
         right_x = A4[0] - 16 * mm
 
-        # Logo: top-right, aligned with OR slightly above the title line
-        # Keep it compact so it never collides with the page number.
+        # Logo: same visual height as the title line, top-right on the SAME line
+        # 12.5pt title text ~= 4.4mm. Give the logo a ~4.8mm height to match.
         target_h = 6.2 * mm
-        target_w = 24 * mm
+        target_w = 24 * mm  # keep compact so it doesn't collide with the page number
 
         x_logo = right_x - target_w
-        # Title baseline (left). Place logo on the same line, nudged slightly upward.
+        # drawString uses a baseline; align logo vertically with the title's text box.
         title_y = top_y - 3 * mm
-        y_logo = title_y + 1.2 * mm
+        y_logo = title_y + (1.2 * mm)
 
         if logo:
             try:
@@ -1116,7 +1118,7 @@ def build_pdf(report: AuditReport) -> bytes:
         f"NA: <b>{counts.get('NA',0)}</b>",
         styles["BodyX"]
     ))
-    story.append(NextPageTemplate("Later"))
+    story.append(NextPageTemplate('Later'))
     story.append(PageBreak())
 
     for sec_name, items in report.sections:
@@ -1276,81 +1278,6 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 
 @app.get("/")
-
-    pt_first = PageTemplate(id="First", frames=[frame_first], onPage=header_footer)
-    pt_later = PageTemplate(id="Later", frames=[frame_later], onPage=header_footer)
-    doc.addPageTemplates([pt_first, pt_later])
-
-    def P(text: Any, style: str = "TinyX") -> Paragraph:
-        return Paragraph(esc(text), styles[style])
-
-    def safe_para(text: str, style_name: str) -> Paragraph:
-        try:
-            return Paragraph(text, styles[style_name])
-        except Exception:
-            plain = text.replace("<", "&lt;").replace(">", "&gt;")
-            return Paragraph(plain, styles[style_name])
-
-    def badge(status: str) -> str:
-        st = (status or "").upper()
-        if st == "PASS":
-            return "<font color='#16a34a'><b>PASS</b></font>"
-        if st == "WARN":
-            return "<font color='#f59e0b'><b>WARN</b></font>"
-        if st == "FAIL":
-            return "<font color='#dc2626'><b>FAIL</b></font>"
-        if st == "NEEDS_INPUT":
-            return "<font color='#7c3aed'><b>NEEDS INPUT</b></font>"
-        return f"<font color='#64748b'><b>{esc(st)}</b></font>"
-
-    # Standard table width (use the widest table: Rates)
-    STANDARD_TABLE_WIDTH = sum([44*mm, 34*mm, 38*mm, 44*mm, 18*mm, 18*mm])
-
-    def make_long_table(header: List[str], rows: List[List[Any]], col_widths: List[float]) -> LongTable:
-        data: List[List[Any]] = [[P(h, "SmallX") for h in header]]
-        for r in rows:
-            data.append([c if isinstance(c, Paragraph) else P(c, "TinyX") for c in r])
-        # Scale all tables to a consistent width for alignment/scanability
-        try:
-            total_w = float(sum(col_widths)) if col_widths else 0.0
-            target_w = float(STANDARD_TABLE_WIDTH)
-            if total_w > 0 and target_w > 0:
-                scale = target_w / total_w
-                col_widths = [w * scale for w in col_widths]
-        except Exception:
-            pass
-
-        t = LongTable(data, colWidths=col_widths, repeatRows=1)
-        t.hAlign = "LEFT"
-
-        id_cols = set()
-        for i, h in enumerate(header):
-            hl = (h or "").lower()
-            if "id" in hl or "uuid" in hl:
-                id_cols.add(i)
-
-        ts = TableStyle([
-            ("FONTNAME", (0, 0), (-1, -1), "Inter"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F7BCF1")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1C1D24")),
-            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cbd5e1")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 4),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ])
-        for ci in sorted(id_cols):
-            ts.add("FONTSIZE", (ci, 1), (ci, -1), 6.8)
-
-        for i in range(1, len(data)):
-            if i % 2 == 0:
-                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#EFEFFF"))
-
-        t.setStyle(ts)
-        return t
-
 def home():
     return render_template_string(HTML)
 
@@ -1396,4 +1323,9 @@ def health():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)    # Page templates (First page uses original left margin; later pages use reduced left margin)
+    pt_first = PageTemplate(id="First", frames=[frame_first], onPage=header_footer)
+    pt_later = PageTemplate(id="Later", frames=[frame_later], onPage=header_footer)
+    doc.addPageTemplates([pt_first, pt_later])
+
+
