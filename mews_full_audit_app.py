@@ -273,7 +273,12 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
         resource_category_assignments = []
 
     payments: List[Dict[str, Any]] = []
+    payments: List[Dict[str, Any]] = []
+    payment_origin_counts_charged_6m: List[Dict[str, Any]] = []
+    payment_origin_counts_failed_6m: List[Dict[str, Any]] = []
+
     try:
+        # 30-day sample (kept for quick diagnostics and a compact table in the PDF)
         start = (utc_now() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
         end = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
         payments = mc.paged_get_all(
@@ -282,9 +287,59 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
             "Payments",
             count_per_page=500, hard_limit=20000,
         )
+
+        # 6-month PaymentOrigin breakdowns
+        # NOTE: Connector API time interval filters have a max length of 3 months, so we query in two windows.
+        now = utc_now()
+        start_6m = (now - timedelta(days=183)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        mid_3m = (now - timedelta(days=92)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_0m = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def _coerce_origin(v: Any) -> str:
+            if v is None or v == "":
+                return "None"
+            # sometimes enums can arrive as dicts; fall back safely
+            if isinstance(v, dict):
+                return str(v.get("Value") or v.get("Name") or v.get("Code") or v)  # best-effort
+            return str(v)
+
+        def _count_by_origin(pay_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            counts: Dict[str, int] = {}
+            for p in pay_list:
+                key = _coerce_origin(p.get("PaymentOrigin"))
+                counts[key] = counts.get(key, 0) + 1
+            # sort by count desc, then origin
+            return [{"PaymentOrigin": k, "Count": v} for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))]
+
+        def _fetch_payments_window(start_iso: str, end_iso: str, states: List[str], err_key: str) -> List[Dict[str, Any]]:
+            try:
+                return mc.paged_get_all(
+                    "Payments", "GetAll",
+                    {"EnterpriseIds": enterprises, "CreatedUtc": {"StartUtc": start_iso, "EndUtc": end_iso}, "States": states},
+                    "Payments",
+                    count_per_page=1000, hard_limit=50000,
+                )
+            except Exception as e:
+                errors[err_key] = str(e)
+                return []
+
+        # Charged (successful)
+        charged_all: List[Dict[str, Any]] = []
+        charged_all.extend(_fetch_payments_window(start_6m, mid_3m, ["Charged"], "payments_origin_charged_6m_w1"))
+        charged_all.extend(_fetch_payments_window(mid_3m, end_0m, ["Charged"], "payments_origin_charged_6m_w2"))
+        payment_origin_counts_charged_6m = _count_by_origin(charged_all)
+
+        # Failed / Cancelled
+        failed_all: List[Dict[str, Any]] = []
+        failed_all.extend(_fetch_payments_window(start_6m, mid_3m, ["Failed", "Canceled"], "payments_origin_failed_6m_w1"))
+        failed_all.extend(_fetch_payments_window(mid_3m, end_0m, ["Failed", "Canceled"], "payments_origin_failed_6m_w2"))
+        payment_origin_counts_failed_6m = _count_by_origin(failed_all)
+
     except Exception as e:
         errors["payments_getall"] = str(e)
         payments = []
+        payment_origin_counts_charged_6m = []
+        payment_origin_counts_failed_6m = []
 
     cancellation_policies: List[Dict[str, Any]] = []
     if service_ids:
@@ -828,8 +883,8 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
     sections.append(("Accounting configuration", accounting_items))
 
     pay_items: List[CheckItem] = []
-    st_pay, err_pay = status_for(["payments_getall"], "PASS")
-    s = f"Payments retrieved: {len(payments)}"
+    st_pay, err_pay = status_for(["payments_getall", "payments_origin_charged_6m_w1", "payments_origin_charged_6m_w2", "payments_origin_failed_6m_w1", "payments_origin_failed_6m_w2"], "PASS")
+    s = f"Payments (30d sample)={len(payments)} | 6m Charged origins={len(payment_origin_counts_charged_6m)} | 6m Failed/Cancelled origins={len(payment_origin_counts_failed_6m)}"
     if err_pay:
         s += f" | {err_pay}"
     pay_items.append(CheckItem(
@@ -838,7 +893,7 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
         summary=s,
         source="Connector: Payments/GetAll (CreatedUtc 30d window)",
         remediation="If empty or failing, verify token scope/permissions and that the CreatedUtc window is supported.",
-        details={"Payments": payments},
+        details={"Payments": payments, "PaymentOriginCountsCharged6m": payment_origin_counts_charged_6m, "PaymentOriginCountsFailed6m": payment_origin_counts_failed_6m},
         risk="Low"
     ))
     sections.append(("Payments", pay_items))
@@ -964,8 +1019,8 @@ def build_pdf(report: AuditReport) -> bytes:
         # --- Document + frames (Page 1 default margins; Pages 2+ left margin reduced by 50%) ---
     PAGE_W, PAGE_H = A4
     LEFT_FIRST = 16 * mm
-    LEFT_LATER = LEFT_FIRST * 0.5
     RIGHT = 16 * mm
+    LEFT_LATER = RIGHT
     TOP = 18 * mm
     BOTTOM = 16 * mm
 
@@ -1214,6 +1269,38 @@ def build_pdf(report: AuditReport) -> bytes:
                 block.append(Spacer(1, 3))
                 for ch in chunk_list(rows, 300):
                     block.append(make_long_table(header, ch, [38*mm, 22*mm, 16*mm, 10*mm, 16*mm, 16*mm, 44*mm]))
+                    block.append(Spacer(1, 6))
+
+                # PaymentOrigin breakdowns (last 6 months)
+                charged_counts = (it.details or {}).get("PaymentOriginCountsCharged6m") or []
+                failed_counts = (it.details or {}).get("PaymentOriginCountsFailed6m") or []
+
+                if charged_counts:
+                    block.append(Paragraph("<b>Payment Origin (last 6 months) — Charged</b>", styles["SmallX"]))
+                    block.append(Spacer(1, 3))
+                    header2 = [P("<b>Payment origin</b>"), P("<b>Count</b>")]
+                    rows2 = [[P(str(r.get("PaymentOrigin") or "None")), P(str(r.get("Count") or 0))] for r in charged_counts]
+                    for ch2 in chunk_list(rows2, 500):
+                        block.append(make_long_table(header2, ch2, [90*mm, 30*mm]))
+                        block.append(Spacer(1, 6))
+                else:
+                    block.append(Paragraph("<b>Payment Origin (last 6 months) — Charged</b>", styles["SmallX"]))
+                    block.append(Spacer(1, 2))
+                    block.append(Paragraph("<font color='#64748b'>NEEDS_INPUT: No data returned (or API call failed).</font>", styles["TinyX"]))
+                    block.append(Spacer(1, 6))
+
+                if failed_counts:
+                    block.append(Paragraph("<b>Payment Origin (last 6 months) — Failed / Cancelled</b>", styles["SmallX"]))
+                    block.append(Spacer(1, 3))
+                    header3 = [P("<b>Payment origin</b>"), P("<b>Count</b>")]
+                    rows3 = [[P(str(r.get("PaymentOrigin") or "None")), P(str(r.get("Count") or 0))] for r in failed_counts]
+                    for ch3 in chunk_list(rows3, 500):
+                        block.append(make_long_table(header3, ch3, [90*mm, 30*mm]))
+                        block.append(Spacer(1, 6))
+                else:
+                    block.append(Paragraph("<b>Payment Origin (last 6 months) — Failed / Cancelled</b>", styles["SmallX"]))
+                    block.append(Spacer(1, 2))
+                    block.append(Paragraph("<font color='#64748b'>NEEDS_INPUT: No data returned (or API call failed).</font>", styles["TinyX"]))
                     block.append(Spacer(1, 6))
 
             if it.source:
