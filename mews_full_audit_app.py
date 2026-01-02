@@ -291,8 +291,9 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
         # 6-month PaymentOrigin breakdowns
         # NOTE: Connector API time interval filters have a max length of 3 months, so we query in two windows.
         now = utc_now()
-        start_6m = (now - timedelta(days=183)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        mid_3m = (now - timedelta(days=92)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        start_6m = (now - timedelta(days=180)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        mid_4m = (now - timedelta(days=120)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        mid_2m = (now - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
         end_0m = now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         def _coerce_origin(v: Any) -> str:
@@ -325,14 +326,16 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
 
         # Charged (successful)
         charged_all: List[Dict[str, Any]] = []
-        charged_all.extend(_fetch_payments_window(start_6m, mid_3m, ["Charged"], "payments_origin_charged_6m_w1"))
-        charged_all.extend(_fetch_payments_window(mid_3m, end_0m, ["Charged"], "payments_origin_charged_6m_w2"))
+        charged_all.extend(_fetch_payments_window(start_6m, mid_4m, ["Charged"], "payments_origin_charged_6m_w1"))
+        charged_all.extend(_fetch_payments_window(mid_4m, mid_2m, ["Charged"], "payments_origin_charged_6m_w2"))
+        charged_all.extend(_fetch_payments_window(mid_2m, end_0m, ["Charged"], "payments_origin_charged_6m_w3"))
         payment_origin_counts_charged_6m = _count_by_origin(charged_all)
 
         # Failed / Cancelled
         failed_all: List[Dict[str, Any]] = []
-        failed_all.extend(_fetch_payments_window(start_6m, mid_3m, ["Failed", "Canceled"], "payments_origin_failed_6m_w1"))
-        failed_all.extend(_fetch_payments_window(mid_3m, end_0m, ["Failed", "Canceled"], "payments_origin_failed_6m_w2"))
+        failed_all.extend(_fetch_payments_window(start_6m, mid_4m, ["Failed", "Canceled"], "payments_origin_failed_6m_w1"))
+        failed_all.extend(_fetch_payments_window(mid_4m, mid_2m, ["Failed", "Canceled"], "payments_origin_failed_6m_w2"))
+        failed_all.extend(_fetch_payments_window(mid_2m, end_0m, ["Failed", "Canceled"], "payments_origin_failed_6m_w3"))
         payment_origin_counts_failed_6m = _count_by_origin(failed_all)
 
     except Exception as e:
@@ -1022,12 +1025,12 @@ def build_pdf(report: AuditReport) -> bytes:
         # --- Document + frames (Page 1 default margins; Pages 2+ left margin reduced by 50%) ---
     PAGE_W, PAGE_H = A4
     LEFT_FIRST = 16 * mm
-    RIGHT = 16 * mm
-    LEFT_LATER = RIGHT
+    RIGHT_FIRST = 16 * mm
+    LEFT_LATER = 8 * mm
+    RIGHT_LATER = 8 * mm
     TOP = 18 * mm
     BOTTOM = 16 * mm
-
-    doc = BaseDocTemplate(
+doc = BaseDocTemplate(
         buf,
         pagesize=A4,
         title="Mews Configuration Audit Report",
