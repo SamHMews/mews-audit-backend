@@ -1087,9 +1087,12 @@ def build_pdf(report: AuditReport) -> bytes:
         canvas.drawCentredString(A4[0] / 2.0, bottom_y, f"Page {doc_.page}")
 
         canvas.restoreState()
+    # Page templates: page 1 uses original left margin; later pages use reduced left margin
+    pt_first = PageTemplate(id="First", frames=[frame_first], onPage=header_footer)
+    pt_later = PageTemplate(id="Later", frames=[frame_later], onPage=header_footer)
+    doc.addPageTemplates([pt_first, pt_later])
 
     story: List[Any] = []
-
     story.append(Spacer(1, 16))
     story.append(Paragraph("Mews Configuration Audit Report", styles["TitleX"]))
     story.append(Paragraph(
@@ -1324,8 +1327,5 @@ def health():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)    # Page templates (First page uses original left margin; later pages use reduced left margin)
-    pt_first = PageTemplate(id="First", frames=[frame_first], onPage=header_footer)
-    pt_later = PageTemplate(id="Later", frames=[frame_later], onPage=header_footer)
-    doc.addPageTemplates([pt_first, pt_later])
 
 
