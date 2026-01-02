@@ -3,7 +3,7 @@
 # Start command: gunicorn mews_full_audit_app:app
 # =========================================================
 #
-# v6 changes (per Sam's requirements) :
+# v6 changes (per Sam's requirements):
 # - NEEDS_INPUT: Any section where required API calls failed is marked NEEDS_INPUT (and error surfaced)
 # - Product mapping Tax %: uses configured taxation rate (via Taxations/GetAll) when available
 # - Logo: defaults to Mews SVG logo URL if LOGO_URL env var is not set
@@ -883,10 +883,11 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
     sections.append(("Accounting configuration", accounting_items))
 
     pay_items: List[CheckItem] = []
+    # Default counts (populated below when 6-month windows are fetched)
+    payment_origin_counts_charged_6m: Dict[str, int] = {}
+    payment_origin_counts_failed_6m: Dict[str, int] = {}
     st_pay, err_pay = status_for(["payments_getall", "payments_origin_charged_6m_w1", "payments_origin_charged_6m_w2", "payments_origin_failed_6m_w1", "payments_origin_failed_6m_w2"], "PASS")
-    payment_origin_counts_charged_6m = payment_origin_counts_charged_6m if "payment_origin_counts_charged_6m" in locals() else {}
-        payment_origin_counts_failed_6m = payment_origin_counts_failed_6m if "payment_origin_counts_failed_6m" in locals() else {}
-        s = f"Payments (30d sample)={len(payments)} | 6m Charged origins={len(payment_origin_counts_charged_6m)} | 6m Failed/Cancelled origins={len(payment_origin_counts_failed_6m)}"
+    s = f"Payments (30d sample)={len(payments)} | 6m Charged origins={len(payment_origin_counts_charged_6m)} | 6m Failed/Cancelled origins={len(payment_origin_counts_failed_6m)}"
     if err_pay:
         s += f" | {err_pay}"
     pay_items.append(CheckItem(
