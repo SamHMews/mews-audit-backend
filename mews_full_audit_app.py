@@ -1022,7 +1022,7 @@ def build_pdf(report: AuditReport) -> bytes:
 
     logo = fetch_logo()
 
-        # --- Document + frames (Page 1 default margins; Pages 2+ left margin reduced by 50%) ---
+    # --- Document + frames (Page 1 default margins; Pages 2+ margins tightened) ---
     PAGE_W, PAGE_H = A4
     LEFT_FIRST = 16 * mm
     RIGHT_FIRST = 16 * mm
@@ -1030,15 +1030,15 @@ def build_pdf(report: AuditReport) -> bytes:
     RIGHT_LATER = 8 * mm
     TOP = 18 * mm
     BOTTOM = 16 * mm
-doc = BaseDocTemplate(
+    doc = BaseDocTemplate(
         buf,
         pagesize=A4,
         title="Mews Configuration Audit Report",
         author="Mews Audit Tool",
     )
 
-    frame_first = Frame(LEFT_FIRST, BOTTOM, PAGE_W - LEFT_FIRST - RIGHT, PAGE_H - TOP - BOTTOM, id="F_FIRST")
-    frame_later = Frame(LEFT_LATER, BOTTOM, PAGE_W - LEFT_LATER - RIGHT, PAGE_H - TOP - BOTTOM, id="F_LATER")
+    frame_first = Frame(LEFT_FIRST, BOTTOM, PAGE_W - LEFT_FIRST - RIGHT_FIRST, PAGE_H - TOP - BOTTOM, id="F_FIRST")
+    frame_later = Frame(LEFT_LATER, BOTTOM, PAGE_W - LEFT_LATER - RIGHT_LATER, PAGE_H - TOP - BOTTOM, id="F_LATER")
 
     def P(text: Any, style: str = "TinyX") -> Paragraph:
         return Paragraph(esc(text), styles[style])
