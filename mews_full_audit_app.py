@@ -1015,6 +1015,19 @@ def build_pdf(report: AuditReport) -> bytes:
         author="Mews Audit Tool",
     )
 
+    # Store original margins
+    ORIGINAL_LEFT_MARGIN = doc.leftMargin
+
+    def _later_pages(canvas, doc_):
+        # Reduce left margin by 50% for all pages except the first
+        doc_.leftMargin = ORIGINAL_LEFT_MARGIN * 0.5
+        header_footer(canvas, doc_)
+
+    def _first_page(canvas, doc_):
+        # Page 1 uses original margins
+        doc_.leftMargin = ORIGINAL_LEFT_MARGIN
+        header_footer(canvas, doc_)
+
     def P(text: Any, style: str = "TinyX") -> Paragraph:
         return Paragraph(esc(text), styles[style])
 
@@ -1271,7 +1284,7 @@ def build_pdf(report: AuditReport) -> bytes:
         story.append(make_long_table(["Call"], ch, [A4[0] - (32 * mm)]))
         story.append(Spacer(1, 6))
 
-    doc.build(story, onFirstPage=header_footer, onLaterPages=header_footer)
+    doc.build(story, onFirstPage=header_footer, onLaterPages=header_footer, onFirstPage=_first_page, onLaterPages=_later_pages)
     pdf = buf.getvalue()
     if len(pdf) > MAX_PDF_MB * 1024 * 1024:
         raise RuntimeError(f"Generated PDF too large ({len(pdf)/(1024*1024):.1f}MB) for environment limit ({MAX_PDF_MB}MB).")
