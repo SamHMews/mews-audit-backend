@@ -27,7 +27,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.enums import TA_CENTER
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether
+from reportlab.platypus import SimpleDocTemplate, BaseDocTemplate, Frame, PageTemplate, NextPageTemplate, Paragraph, Spacer, PageBreak, KeepTogether
 from reportlab.platypus.tables import LongTable, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
@@ -1004,28 +1004,51 @@ def build_pdf(report: AuditReport) -> bytes:
 
     logo = fetch_logo()
 
-    doc = SimpleDocTemplate(
+    doc = BaseDocTemplate(
         buf,
         pagesize=A4,
-        leftMargin=16 * mm,
-        rightMargin=16 * mm,
-        topMargin=18 * mm,
-        bottomMargin=16 * mm,
         title="Mews Configuration Audit Report",
         author="Mews Audit Tool",
     )
 
+    # Page 1: original margins
+    left_1 = 16 * mm
+    right = 16 * mm
+    top = 18 * mm
+    bottom = 16 * mm
 
-    # Store original margins (page 1 keeps these; pages 2+ reduce left margin by 50%)
-    ORIGINAL_LEFT_MARGIN = doc.leftMargin
+    # Pages 2+: reduce LEFT margin by 50% (right/top/bottom unchanged)
+    left_later = left_1 * 0.5
 
-    def _first_page(canvas, doc_):
-        doc_.leftMargin = ORIGINAL_LEFT_MARGIN
-        header_footer(canvas, doc_)
+    frame_first = Frame(
+        left_1,
+        bottom,
+        A4[0] - left_1 - right,
+        A4[1] - top - bottom,
+        id="frame_first",
+        leftPadding=0,
+        rightPadding=0,
+        topPadding=0,
+        bottomPadding=0,
+        showBoundary=0,
+    )
 
-    def _later_pages(canvas, doc_):
-        doc_.leftMargin = ORIGINAL_LEFT_MARGIN * 0.5
-        header_footer(canvas, doc_)
+    frame_later = Frame(
+        left_later,
+        bottom,
+        A4[0] - left_later - right,
+        A4[1] - top - bottom,
+        id="frame_later",
+        leftPadding=0,
+        rightPadding=0,
+        topPadding=0,
+        bottomPadding=0,
+        showBoundary=0,
+    )
+
+    pt_first = PageTemplate(id="First", frames=[frame_first], onPage=header_footer)
+    pt_later = PageTemplate(id="Later", frames=[frame_later], onPage=header_footer)
+    doc.addPageTemplates([pt_first, pt_later])
 
     def P(text: Any, style: str = "TinyX") -> Paragraph:
         return Paragraph(esc(text), styles[style])
@@ -1167,6 +1190,7 @@ def build_pdf(report: AuditReport) -> bytes:
         f"NA: <b>{counts.get('NA',0)}</b>",
         styles["BodyX"]
     ))
+    story.append(NextPageTemplate("Later"))
     story.append(PageBreak())
 
     for sec_name, items in report.sections:
@@ -1283,7 +1307,7 @@ def build_pdf(report: AuditReport) -> bytes:
         story.append(make_long_table(["Call"], ch, [A4[0] - (32 * mm)]))
         story.append(Spacer(1, 6))
 
-    doc.build(story, onFirstPage=_first_page, onLaterPages=_later_pages)
+    doc.build(story)
 pdf = buf.getvalue()
     if len(pdf) > MAX_PDF_MB * 1024 * 1024:
         raise RuntimeError(f"Generated PDF too large ({len(pdf)/(1024*1024):.1f}MB) for environment limit ({MAX_PDF_MB}MB).")
