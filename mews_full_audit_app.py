@@ -1064,7 +1064,7 @@ def build_pdf(report: AuditReport) -> bytes:
         ts = TableStyle([
             ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
             ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2ff")),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F7BCF1")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
             ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cbd5e1")),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -1078,7 +1078,7 @@ def build_pdf(report: AuditReport) -> bytes:
 
         for i in range(1, len(data)):
             if i % 2 == 0:
-                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#f8fafc"))
+                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#EFEFFF"))
 
         t.setStyle(ts)
         return t
@@ -1116,10 +1116,10 @@ def build_pdf(report: AuditReport) -> bytes:
         # Title on the left
         canvas.setFont("Helvetica-Bold", 12.5)
         canvas.drawString(16 * mm, title_y, "Mews Configuration Audit Report")
-
-        # Page number to the left of the logo box (so it never overlaps)
+        # Page number in footer (bottom-right)
         canvas.setFont("Helvetica", 8.5)
-        canvas.drawRightString(x_logo - 3 * mm, title_y, f"Page {doc_.page}")
+        canvas.drawRightString(A4[0] - 16 * mm, 10 * mm, f"Page {doc_.page}")
+
 
         canvas.restoreState()
 
