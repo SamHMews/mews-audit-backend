@@ -887,10 +887,11 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
 
     pay_items.append(
         CheckItem(
-            "Payments (last 30 days sample)",
-            st_pay,
-            "Low",
-            s,
+            key="Payments (last 30 days sample)",
+            status=st_pay,
+            summary=s,
+            source="Connector: Payments/GetAll (CreatedUtc window: 30 days sample + 90 days summaries, count<=1000)",
+            remediation="If empty or failing, verify token scope/permissions and that the CreatedUtc window is supported. For PaymentOrigin summaries, confirm Payments/GetAll returns PaymentOrigin in your environment.",
             details={
                 "Payments": payments,
                 "PaymentOriginCountsCharged90d": po_charged,
@@ -898,9 +899,8 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
                 "PaymentOriginCharged90dError": err_po_charged,
                 "PaymentOriginFailed90dError": err_po_failed,
             },
-            source="Connector: Payments/GetAll (CreatedUtc window: 30 days sample + 90 days summaries, count<=1000)",
+            risk="Low",
         )
-    )
     sections.append(("Payments", pay_items))
 
     inv_items: List[CheckItem] = []
