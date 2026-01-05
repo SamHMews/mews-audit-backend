@@ -901,6 +901,7 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
             },
             risk="Low",
         )
+    )
     sections.append(("Payments", pay_items))
 
     inv_items: List[CheckItem] = []
