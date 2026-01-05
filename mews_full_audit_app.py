@@ -27,11 +27,9 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.enums import TA_CENTER
-from reportlab.platypus import BaseDocTemplate, Frame, PageTemplate, NextPageTemplate, Paragraph, Spacer, PageBreak, KeepTogether
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether
 from reportlab.platypus.tables import LongTable, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 
 from svglib.svglib import svg2rlg
 from reportlab.graphics import renderPDF
@@ -273,12 +271,7 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
         resource_category_assignments = []
 
     payments: List[Dict[str, Any]] = []
-    payments: List[Dict[str, Any]] = []
-    payment_origin_counts_charged_6m: List[Dict[str, Any]] = []
-    payment_origin_counts_failed_6m: List[Dict[str, Any]] = []
-
     try:
-        # 30-day sample (kept for quick diagnostics and a compact table in the PDF)
         start = (utc_now() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
         end = utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
         payments = mc.paged_get_all(
@@ -287,50 +280,53 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
             "Payments",
             count_per_page=500, hard_limit=20000,
         )
-
-        # PaymentOrigin breakdowns (rolling last 90 days)
-        # Connector API interval limit is effectively ~3 months, so we use a single 90-day window.
-        now = utc_now()
-        start_90d = (now - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        end_0d = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        def _coerce_origin(v: Any) -> str:
-            if v is None or v == "":
-                return "None"
-            if isinstance(v, dict):
-                return str(v.get("Value") or v.get("Name") or v.get("Code") or v)
-            return str(v)
-
-        def _count_by_origin(pay_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-            counts: Dict[str, int] = {}
-            for p in pay_list:
-                key = _coerce_origin(p.get("PaymentOrigin"))
-                counts[key] = counts.get(key, 0) + 1
-            return [{"PaymentOrigin": k, "Count": v} for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))]
-
-        # Charged (successful) — last 90 days, limit 1000
-        charged_90d = mc.paged_get_all(
-            "Payments", "GetAll",
-            {"EnterpriseIds": enterprises, "CreatedUtc": {"StartUtc": start_90d, "EndUtc": end_0d}, "States": ["Charged"]},
-            "Payments",
-            count_per_page=1000, hard_limit=1000,
-        )
-        payment_origin_counts_charged_6m = _count_by_origin(charged_90d)
-
-        # Failed / Cancelled — last 90 days, limit 1000
-        failed_90d = mc.paged_get_all(
-            "Payments", "GetAll",
-            {"EnterpriseIds": enterprises, "CreatedUtc": {"StartUtc": start_90d, "EndUtc": end_0d}, "States": ["Failed", "Canceled"]},
-            "Payments",
-            count_per_page=1000, hard_limit=1000,
-        )
-        payment_origin_counts_failed_6m = _count_by_origin(failed_90d)
-
     except Exception as e:
         errors["payments_getall"] = str(e)
         payments = []
-        payment_origin_counts_charged_6m = []
-        payment_origin_counts_failed_6m = []
+    # Payments — PaymentOrigin summary (last 90 days, limited to 1000)
+    payment_origin_counts_charged_90d: List[Dict[str, Any]] = []
+    payment_origin_counts_failed_90d: List[Dict[str, Any]] = []
+    try:
+        start90 = (utc_now() - timedelta(days=90)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        end90 = utc_now().strftime('%Y-%m-%dT%H:%M:%SZ')
+        payments_90d_charged = mc.paged_get_all(
+            "Payments", "GetAll",
+            {"EnterpriseIds": enterprises, "CreatedUtc": {"StartUtc": start90, "EndUtc": end90}, "States": ["Charged"]},
+            "Payments",
+            count_per_page=1000,
+            hard_limit=1000,
+        )
+        counts: Dict[str, int] = {}
+        for pmt in payments_90d_charged or []:
+            origin = (pmt.get("PaymentOrigin") or "None").strip() if isinstance(pmt, dict) else "None"
+            if not origin:
+                origin = "None"
+            counts[origin] = counts.get(origin, 0) + 1
+        payment_origin_counts_charged_90d = [{"PaymentOrigin": k, "Count": v} for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+    except Exception as e:
+        errors["payments_origin_charged_90d"] = str(e)
+        payment_origin_counts_charged_90d = []
+
+    try:
+        start90 = (utc_now() - timedelta(days=90)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        end90 = utc_now().strftime('%Y-%m-%dT%H:%M:%SZ')
+        payments_90d_failed = mc.paged_get_all(
+            "Payments", "GetAll",
+            {"EnterpriseIds": enterprises, "CreatedUtc": {"StartUtc": start90, "EndUtc": end90}, "States": ["Cancelled", "Failed"]},
+            "Payments",
+            count_per_page=1000,
+            hard_limit=1000,
+        )
+        counts: Dict[str, int] = {}
+        for pmt in payments_90d_failed or []:
+            origin = (pmt.get("PaymentOrigin") or "None").strip() if isinstance(pmt, dict) else "None"
+            if not origin:
+                origin = "None"
+            counts[origin] = counts.get(origin, 0) + 1
+        payment_origin_counts_failed_90d = [{"PaymentOrigin": k, "Count": v} for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+    except Exception as e:
+        errors["payments_origin_failed_90d"] = str(e)
+        payment_origin_counts_failed_90d = []
 
     cancellation_policies: List[Dict[str, Any]] = []
     if service_ids:
@@ -360,6 +356,8 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
         "resource_category_assignments": resource_category_assignments,
         "restrictions": restrictions,
         "payments": payments,
+        "payment_origin_counts_charged_90d": payment_origin_counts_charged_90d,
+        "payment_origin_counts_failed_90d": payment_origin_counts_failed_90d,
         "cancellation_policies": cancellation_policies,
         "rules": rules,
         "tax_environments": tax_envs,
@@ -874,22 +872,35 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
     sections.append(("Accounting configuration", accounting_items))
 
     pay_items: List[CheckItem] = []
-    # Default counts (populated below when 90-day windows are fetched)
-    payment_origin_counts_charged_6m: Dict[str, int] = {}
-    payment_origin_counts_failed_6m: Dict[str, int] = {}
-    st_pay, err_pay = status_for(["payments_getall", "payments_origin_charged_6m_w1", "payments_origin_charged_6m_w2", "payments_origin_failed_6m_w1", "payments_origin_failed_6m_w2"], "PASS")
-    s = f"Payments (30d sample)={len(payments)} | 90d Charged origins={len(payment_origin_counts_charged_6m)} | 90d Failed/Cancelled origins={len(payment_origin_counts_failed_6m)}"
+    st_pay, err_pay = status_for(["payments_getall"], "PASS")
+    payments = data.get("payments", []) or []
+
+    # PaymentOrigin summaries (last 90 days, limited to 1000)
+    po_charged = data.get("payment_origin_counts_charged_90d", []) or []
+    po_failed = data.get("payment_origin_counts_failed_90d", []) or []
+    err_po_charged = data.get("errors", {}).get("payments_origin_charged_90d")
+    err_po_failed = data.get("errors", {}).get("payments_origin_failed_90d")
+
+    s = f"Payments (30d sample)={len(payments)} | 90d Charged origins={len(po_charged)} | 90d Failed/Cancelled origins={len(po_failed)}"
     if err_pay:
         s += f" | {err_pay}"
-    pay_items.append(CheckItem(
-        key="Payments (last 30 days sample)",
-        status=st_pay,
-        summary=s,
-        source="Connector: Payments/GetAll (CreatedUtc 30d window)",
-        remediation="If empty or failing, verify token scope/permissions and that the CreatedUtc window is supported.",
-        details={"Payments": payments, "PaymentOriginCountsCharged6m": payment_origin_counts_charged_6m, "PaymentOriginCountsFailed6m": payment_origin_counts_failed_6m},
-        risk="Low"
-    ))
+
+    pay_items.append(
+        CheckItem(
+            "Payments (last 30 days sample)",
+            st_pay,
+            "Low",
+            s,
+            details={
+                "Payments": payments,
+                "PaymentOriginCountsCharged90d": po_charged,
+                "PaymentOriginCountsFailed90d": po_failed,
+                "PaymentOriginCharged90dError": err_po_charged,
+                "PaymentOriginFailed90dError": err_po_failed,
+            },
+            source="Connector: Payments/GetAll (CreatedUtc window: 30 days sample + 90 days summaries, count<=1000)",
+        )
+    )
     sections.append(("Payments", pay_items))
 
     inv_items: List[CheckItem] = []
@@ -994,39 +1005,25 @@ def build_pdf(report: AuditReport) -> bytes:
     from io import BytesIO
 
     buf = BytesIO()
-
-    # --- Font registration (Manrope for headings, Inter for body) ---
-    FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
-    pdfmetrics.registerFont(TTFont("Inter", os.path.join(FONT_DIR, "Inter-Regular.ttf")))
-    pdfmetrics.registerFont(TTFont("Manrope", os.path.join(FONT_DIR, "Manrope-Regular.ttf")))
-    pdfmetrics.registerFont(TTFont("Manrope-Semibold", os.path.join(FONT_DIR, "Manrope-SemiBold.ttf")))
-
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="TitleX", parent=styles["Title"], fontName="Manrope-Semibold", fontSize=20, leading=24, alignment=TA_CENTER, spaceAfter=10, textColor=colors.HexColor("#1C1D24")))
-    styles.add(ParagraphStyle(name="H1X", parent=styles["Heading1"], fontName="Manrope-Semibold", fontSize=15, leading=18, spaceBefore=10, spaceAfter=6, textColor=colors.HexColor("#1C1D24")))
-    styles.add(ParagraphStyle(name="BodyX", parent=styles["BodyText"], fontName="Inter", fontSize=9.6, leading=12, textColor=colors.HexColor("#1C1D24")))
-    styles.add(ParagraphStyle(name="SmallX", parent=styles["BodyText"], fontName="Inter", fontSize=8.6, leading=11, textColor=colors.HexColor("#1C1D24")))
-    styles.add(ParagraphStyle(name="TinyX", parent=styles["BodyText"], fontName="Inter", fontSize=8.1, leading=10, textColor=colors.HexColor("#1C1D24")))
+    styles.add(ParagraphStyle(name="TitleX", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=20, leading=24, alignment=TA_CENTER, spaceAfter=10))
+    styles.add(ParagraphStyle(name="H1X", parent=styles["Heading1"], fontSize=15, leading=18, spaceBefore=10, spaceAfter=6))
+    styles.add(ParagraphStyle(name="BodyX", parent=styles["BodyText"], fontSize=9.6, leading=12))
+    styles.add(ParagraphStyle(name="SmallX", parent=styles["BodyText"], fontSize=8.6, leading=11))
+    styles.add(ParagraphStyle(name="TinyX", parent=styles["BodyText"], fontSize=8.1, leading=10))
 
     logo = fetch_logo()
 
-    # --- Document + frames (Page 1 default margins; Pages 2+ margins tightened) ---
-    PAGE_W, PAGE_H = A4
-    LEFT_FIRST = 16 * mm
-    RIGHT_FIRST = 16 * mm
-    LEFT_LATER = 8 * mm
-    RIGHT_LATER = 8 * mm
-    TOP = 18 * mm
-    BOTTOM = 16 * mm
-    doc = BaseDocTemplate(
+    doc = SimpleDocTemplate(
         buf,
         pagesize=A4,
+        leftMargin=16 * mm,
+        rightMargin=16 * mm,
+        topMargin=18 * mm,
+        bottomMargin=16 * mm,
         title="Mews Configuration Audit Report",
         author="Mews Audit Tool",
     )
-
-    frame_first = Frame(LEFT_FIRST, BOTTOM, PAGE_W - LEFT_FIRST - RIGHT_FIRST, PAGE_H - TOP - BOTTOM, id="F_FIRST")
-    frame_later = Frame(LEFT_LATER, BOTTOM, PAGE_W - LEFT_LATER - RIGHT_LATER, PAGE_H - TOP - BOTTOM, id="F_LATER")
 
     def P(text: Any, style: str = "TinyX") -> Paragraph:
         return Paragraph(esc(text), styles[style])
@@ -1050,24 +1047,12 @@ def build_pdf(report: AuditReport) -> bytes:
             return "<font color='#7c3aed'><b>NEEDS INPUT</b></font>"
         return f"<font color='#64748b'><b>{esc(st)}</b></font>"
 
-    STANDARD_TABLE_WIDTH = sum([44*mm, 34*mm, 38*mm, 44*mm, 18*mm, 18*mm])
-
     def make_long_table(header: List[str], rows: List[List[Any]], col_widths: List[float]) -> LongTable:
         data: List[List[Any]] = [[P(h, "SmallX") for h in header]]
         for r in rows:
             data.append([c if isinstance(c, Paragraph) else P(c, "TinyX") for c in r])
-        # Scale all tables to a consistent width for alignment/scanability
-        try:
-            total_w = float(sum(col_widths)) if col_widths else 0.0
-            target_w = float(STANDARD_TABLE_WIDTH)
-            if total_w > 0 and target_w > 0:
-                scale = target_w / total_w
-                col_widths = [w * scale for w in col_widths]
-        except Exception:
-            pass
 
         t = LongTable(data, colWidths=col_widths, repeatRows=1)
-        t.hAlign = "LEFT"
 
         id_cols = set()
         for i, h in enumerate(header):
@@ -1076,10 +1061,10 @@ def build_pdf(report: AuditReport) -> bytes:
                 id_cols.add(i)
 
         ts = TableStyle([
-            ("FONTNAME", (0, 0), (-1, -1), "Inter"),
+            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
             ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F7BCF1")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1C1D24")),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2ff")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
             ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cbd5e1")),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("LEFTPADDING", (0, 0), (-1, -1), 4),
@@ -1092,7 +1077,7 @@ def build_pdf(report: AuditReport) -> bytes:
 
         for i in range(1, len(data)):
             if i % 2 == 0:
-                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#EFEFFF"))
+                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#f8fafc"))
 
         t.setStyle(ts)
         return t
@@ -1105,13 +1090,13 @@ def build_pdf(report: AuditReport) -> bytes:
 
         # Logo: same visual height as the title line, top-right on the SAME line
         # 12.5pt title text ~= 4.4mm. Give the logo a ~4.8mm height to match.
-        target_h = 6.2 * mm
-        target_w = 24 * mm  # keep compact so it doesn't collide with the page number
+        target_h = 4.8 * mm
+        target_w = 18 * mm  # keep compact so it doesn't collide with the page number
 
         x_logo = right_x - target_w
         # drawString uses a baseline; align logo vertically with the title's text box.
         title_y = top_y - 3 * mm
-        y_logo = title_y + (1.2 * mm)
+        y_logo = title_y - (target_h * 0.85)
 
         if logo:
             try:
@@ -1128,20 +1113,17 @@ def build_pdf(report: AuditReport) -> bytes:
                 pass
 
         # Title on the left
-        canvas.setFont("Manrope-Semibold", 12.5)
+        canvas.setFont("Helvetica-Bold", 12.5)
         canvas.drawString(16 * mm, title_y, "Mews Configuration Audit Report")
-        # Page number at the bottom (centred)
-        canvas.setFont("Inter", 8.5)
-        bottom_y = 10 * mm
-        canvas.drawCentredString(A4[0] / 2.0, bottom_y, f"Page {doc_.page}")
+
+        # Page number to the left of the logo box (so it never overlaps)
+        canvas.setFont("Helvetica", 8.5)
+        canvas.drawRightString(x_logo - 3 * mm, title_y, f"Page {doc_.page}")
 
         canvas.restoreState()
-    # Page templates: page 1 uses original left margin; later pages use reduced left margin
-    pt_first = PageTemplate(id="First", frames=[frame_first], onPage=header_footer)
-    pt_later = PageTemplate(id="Later", frames=[frame_later], onPage=header_footer)
-    doc.addPageTemplates([pt_first, pt_later])
 
     story: List[Any] = []
+
     story.append(Spacer(1, 16))
     story.append(Paragraph("Mews Configuration Audit Report", styles["TitleX"]))
     story.append(Paragraph(
@@ -1170,7 +1152,6 @@ def build_pdf(report: AuditReport) -> bytes:
         f"NA: <b>{counts.get('NA',0)}</b>",
         styles["BodyX"]
     ))
-    story.append(NextPageTemplate('Later'))
     story.append(PageBreak())
 
     for sec_name, items in report.sections:
@@ -1229,7 +1210,7 @@ def build_pdf(report: AuditReport) -> bytes:
                     "Rate groups",
                     ["Rate group", "Rate group ID", "Activity state"],
                     details.get("RateGroupsTable") or [],
-                    [64*mm, 80*mm, 32*mm],
+                    [86*mm, 58*mm, 32*mm],
                 )
 
             if "RatesTable" in details:
@@ -1264,38 +1245,33 @@ def build_pdf(report: AuditReport) -> bytes:
                 for ch in chunk_list(rows, 300):
                     block.append(make_long_table(header, ch, [38*mm, 22*mm, 16*mm, 10*mm, 16*mm, 16*mm, 44*mm]))
                     block.append(Spacer(1, 6))
+                # PaymentOrigin summary tables (last 90 days, count<=1000)
+                po_charged = (it.details or {}).get("PaymentOriginCountsCharged90d") or []
+                po_failed = (it.details or {}).get("PaymentOriginCountsFailed90d") or []
+                err_po_charged = (it.details or {}).get("PaymentOriginCharged90dError")
+                err_po_failed = (it.details or {}).get("PaymentOriginFailed90dError")
 
-                # PaymentOrigin breakdowns (last 6 months)
-                charged_counts = (it.details or {}).get("PaymentOriginCountsCharged6m") or []
-                failed_counts = (it.details or {}).get("PaymentOriginCountsFailed6m") or []
+                def _render_po_table(title: str, rows_in: List[Dict[str, Any]], err: Optional[str]) -> None:
+                    block.append(Spacer(1, 8))
+                    block.append(Paragraph(esc(title), styles["SmallX"]))
+                    block.append(Spacer(1, 4))
+                    if err:
+                        block.append(Paragraph(f"<font color='#ef4444'>NEEDS_INPUT: {esc(err)}</font>", styles["TinyX"]))
+                        return
+                    if not rows_in:
+                        block.append(Paragraph("<font color='#64748b'>No payments returned for this filter.</font>", styles["TinyX"]))
+                        return
+                    header2 = ["PaymentOrigin", "Count"]
+                    rows2 = []
+                    for r in rows_in:
+                        origin = (r.get("PaymentOrigin") if isinstance(r, dict) else None) or "None"
+                        cnt = r.get("Count") if isinstance(r, dict) else ""
+                        rows2.append([P(str(origin)), P(str(cnt))])
+                    block.append(make_long_table(header2, rows2, [82*mm, 24*mm]))
 
-                if charged_counts:
-                    block.append(Paragraph("<b>Payment Origin (last 90 days) — Charged</b>", styles["SmallX"]))
-                    block.append(Spacer(1, 3))
-                    header2 = [P("<b>Payment origin</b>"), P("<b>Count</b>")]
-                    rows2 = [[P(str(r.get("PaymentOrigin") or "None")), P(str(r.get("Count") or 0))] for r in charged_counts]
-                    for ch2 in chunk_list(rows2, 500):
-                        block.append(make_long_table(header2, ch2, [90*mm, 30*mm]))
-                        block.append(Spacer(1, 6))
-                else:
-                    block.append(Paragraph("<b>Payment Origin (last 90 days) — Charged</b>", styles["SmallX"]))
-                    block.append(Spacer(1, 2))
-                    block.append(Paragraph("<font color='#64748b'>NEEDS_INPUT: No data returned (or API call failed).</font>", styles["TinyX"]))
-                    block.append(Spacer(1, 6))
+                _render_po_table("Payment Origin (last 90 days) — Charged", po_charged, err_po_charged)
+                _render_po_table("Payment Origin (last 90 days) — Failed / Cancelled", po_failed, err_po_failed)
 
-                if failed_counts:
-                    block.append(Paragraph("<b>Payment Origin (last 90 days) — Failed / Cancelled</b>", styles["SmallX"]))
-                    block.append(Spacer(1, 3))
-                    header3 = [P("<b>Payment origin</b>"), P("<b>Count</b>")]
-                    rows3 = [[P(str(r.get("PaymentOrigin") or "None")), P(str(r.get("Count") or 0))] for r in failed_counts]
-                    for ch3 in chunk_list(rows3, 500):
-                        block.append(make_long_table(header3, ch3, [90*mm, 30*mm]))
-                        block.append(Spacer(1, 6))
-                else:
-                    block.append(Paragraph("<b>Payment Origin (last 90 days) — Failed / Cancelled</b>", styles["SmallX"]))
-                    block.append(Spacer(1, 2))
-                    block.append(Paragraph("<font color='#64748b'>NEEDS_INPUT: No data returned (or API call failed).</font>", styles["TinyX"]))
-                    block.append(Spacer(1, 6))
 
             if it.source:
                 block.append(Paragraph(f"<font color='#64748b'><b>Source:</b> {esc(it.source)}</font>", styles["TinyX"]))
@@ -1319,7 +1295,7 @@ def build_pdf(report: AuditReport) -> bytes:
         story.append(make_long_table(["Call"], ch, [A4[0] - (32 * mm)]))
         story.append(Spacer(1, 6))
 
-    doc.build(story)
+    doc.build(story, onFirstPage=header_footer, onLaterPages=header_footer)
     pdf = buf.getvalue()
     if len(pdf) > MAX_PDF_MB * 1024 * 1024:
         raise RuntimeError(f"Generated PDF too large ({len(pdf)/(1024*1024):.1f}MB) for environment limit ({MAX_PDF_MB}MB).")
@@ -1407,6 +1383,4 @@ def health():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)    # Page templates (First page uses original left margin; later pages use reduced left margin)
-
-
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
