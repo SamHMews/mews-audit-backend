@@ -24,7 +24,22 @@ from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
 
 from reportlab.lib import colors
+
+# --- Table colour palette (consistent across all tables) ---
+TABLE_HEADER_BG = colors.HexColor('#f6b6e8')  # light magenta header
+ROW_ALT_BG      = colors.HexColor('#eef0ff')  # subtle lavender zebra rows
+GRID_COLOR      = colors.HexColor('#c7cbe6')  # soft grid line colour
+
 from reportlab.lib.pagesizes import A4
+
+# --- Page / margin constants ---
+PAGE_W, PAGE_H = A4
+DOC_LEFT   = 12 * mm
+DOC_RIGHT  = 12 * mm
+DOC_TOP    = 14 * mm
+DOC_BOTTOM = 14 * mm
+TABLE_FULL_W = PAGE_W - DOC_LEFT - DOC_RIGHT
+
 from reportlab.lib.units import mm
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT, TA_JUSTIFY
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether
@@ -993,26 +1008,17 @@ def build_pdf(report: AuditReport) -> bytes:
 
     buf = BytesIO()
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="TitleX", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=20, leading=24, alignment=TA_LEFT, spaceAfter=10))
+    styles.add(ParagraphStyle(name="TitleX", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=20, leading=24, alignment=TA_LEFT, spaceAfter=10, leftIndent=0, firstLineIndent=0))
     styles.add(ParagraphStyle(name="H1X", parent=styles["Heading1"], fontSize=15, leading=18, spaceBefore=10, spaceAfter=6))
     styles.add(ParagraphStyle(name="BodyX", parent=styles["BodyText"], fontSize=9.6, leading=12))
-    styles.add(ParagraphStyle(name="SmallX", parent=styles["BodyText"], fontSize=8.6, leading=11))
-    styles.add(ParagraphStyle(name="TinyX", parent=styles["BodyText"], fontSize=8.1, leading=10))
+    styles.add(ParagraphStyle(name="SmallX", parent=styles["BodyText"], fontSize=8.6, leading=11, leftIndent=0, firstLineIndent=0))
+    styles.add(ParagraphStyle(name="TinyX", parent=styles["BodyText"], fontSize=8.1, leading=10, leftIndent=0, firstLineIndent=0))
 
     logo = fetch_logo()
 
     TABLE_FULL_W = A4[0] - (16 * mm) - (16 * mm)
 
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=A4,
-        leftMargin=16 * mm,
-        rightMargin=16 * mm,
-        topMargin=18 * mm,
-        bottomMargin=16 * mm,
-        title="Mews Configuration Audit Report",
-        author="Mews Audit Tool",
-    )
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=DOC_LEFT, rightMargin=DOC_RIGHT, topMargin=DOC_TOP, bottomMargin=DOC_BOTTOM)
 
     def P(text: Any, style: str = "TinyX") -> Paragraph:
         return Paragraph(esc(text), styles[style])
