@@ -1035,59 +1035,79 @@ def build_pdf(report: AuditReport) -> bytes:
         if st == "NEEDS_INPUT":
             return "<font color='#7c3aed'><b>NEEDS INPUT</b></font>"
         return f"<font color='#64748b'><b>{esc(st)}</b></font>"
+    def make_long_table(header, rows, col_widths=None, repeat_rows=1):
+        """Create a full-width zebra-striped LongTable.
 
-    def make_long_table(header: List[str], rows: List[List[Any]], col_widths: List[float]) -> LongTable:
-        data: List[List[Any]] = [[P(h, "SmallX") for h in header]]
-        for r in rows:
-            data.append([c if isinstance(c, Paragraph) else P(c, "TinyX") for c in r])
+        - Accepts header items as strings OR Paragraphs.
+        - Accepts row cells as strings/numbers OR Paragraphs.
+        - Normalises column widths to TABLE_FULL_W.
+        """
+        if not rows:
+            rows = []
 
-        scaled = col_widths
-        try:
-            s = float(sum(col_widths))
-            if s and abs(s - TABLE_FULL_W) > 0.5:
-                scaled = [w * (TABLE_FULL_W / s) for w in col_widths]
-        except Exception:
-            scaled = col_widths
+        num_cols = len(header)
 
-        t = LongTable(data, colWidths=scaled, repeatRows=1)
-        t.hAlign = 'LEFT'
+        # Default column widths: even split across full width
+        if not col_widths:
+            col_widths = [TABLE_FULL_W / max(1, num_cols)] * num_cols
 
-        id_cols = set()
-        for i, h in enumerate(header):
-
-            # Header cell may be a string or a ReportLab Paragraph.
-            if hasattr(h, "getPlainText"):
-                hl = (h.getPlainText() or "").lower()
+        # Normalise width list length to match columns
+        if len(col_widths) != num_cols:
+            if len(col_widths) > num_cols:
+                col_widths = col_widths[:num_cols]
             else:
-                try:
-                    hl = (h or "").lower()
-                except Exception:
-                    hl = str(h).lower()
-            if "id" in hl or "uuid" in hl:
-                id_cols.add(i)
+                col_widths = col_widths + [TABLE_FULL_W / max(1, num_cols)] * (num_cols - len(col_widths))
 
-        ts = TableStyle([
-            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F7BCF1")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
-            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cbd5e1")),
+        # Scale widths to full available width
+        total = sum(col_widths)
+        if total and abs(total - TABLE_FULL_W) > 0.1:
+            scale = TABLE_FULL_W / total
+            col_widths = [w * scale for w in col_widths]
+
+        def _cell(val, style_name):
+            return val if isinstance(val, Paragraph) else P(str(val) if val is not None else "", style_name)
+
+        data = [[_cell(h, "SmallX") for h in header]]
+        for r in rows:
+            r = list(r) if isinstance(r, (list, tuple)) else [r]
+            # pad / trim to column count
+            if len(r) < num_cols:
+                r = r + [""] * (num_cols - len(r))
+            elif len(r) > num_cols:
+                r = r[:num_cols]
+            data.append([_cell(c, "TinyX") for c in r])
+
+        t = LongTable(data, colWidths=col_widths, repeatRows=repeat_rows)
+        t.hAlign = "LEFT"
+
+        # Header styling (pink)
+        style_cmds = [
+            ("BACKGROUND", (0, 0), (-1, 0), TABLE_HEADER_BG),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 8.2),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("LEFTPADDING", (0, 0), (-1, -1), 4),
             ("RIGHTPADDING", (0, 0), (-1, -1), 4),
             ("TOPPADDING", (0, 0), (-1, -1), 3),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ])
-        for ci in sorted(id_cols):
-            ts.add("FONTSIZE", (ci, 1), (ci, -1), 6.8)
+            ("GRID", (0, 0), (-1, -1), 0.5, GRID_COLOR),
+        ]
 
-        for i in range(1, len(data)):
-            if i % 2 == 0:
-                ts.add("BACKGROUND", (0, i), (-1, i), colors.HexColor("#EFEFFF"))
+        # Zebra striping for body
+        for r_i in range(1, len(data)):
+            bg = ROW_ALT_BG if r_i % 2 == 0 else colors.white
+            style_cmds.append(("BACKGROUND", (0, r_i), (-1, r_i), bg))
 
-        t.setStyle(ts)
+        # Slightly emphasise key columns if present
+        for c_i, h in enumerate(header):
+            h_text = h.getPlainText() if isinstance(h, Paragraph) else str(h or "")
+            hl = h_text.lower()
+            if "id" == hl or hl.endswith(" id") or "uuid" in hl:
+                style_cmds.append(("TEXTCOLOR", (c_i, 1), (c_i, -1), colors.HexColor("#444444")))
+
+        t.setStyle(TableStyle(style_cmds))
         return t
-
     def header_footer(canvas, doc_):
         canvas.saveState()
 
@@ -1272,7 +1292,7 @@ def build_pdf(report: AuditReport) -> bytes:
                     block.append(Paragraph(f"<b>Detail: {esc(title)}</b>", styles["SmallX"]))
                     block.append(Spacer(1, 10))  # extra spacing between title and table
 
-                    header2 = [P("<b>Payment Origin</b>"), P("<b>Count</b>")]
+                    header2 = ["Payment origin", "Count"]
                     table_rows: List[List[Any]] = []
                     for r in rows_norm:
                         table_rows.append([
