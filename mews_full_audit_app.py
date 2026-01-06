@@ -362,8 +362,6 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
         "rules": rules,
         "tax_environments": tax_envs,
         "taxations": taxations,
-        "counters": counters,
-        "cashiers": cashiers,
         "errors": errors,
         "api_calls": [c.__dict__ for c in mc.calls],
     }
@@ -551,10 +549,9 @@ def build_accounting_categories_table(accounting_categories: List[Dict[str, Any]
         svc_names = [svc_by_id.get(sid, sid) for sid in svc_ids_by_cat.get(cid, [])]
         rows.append({
             "Accounting category": c.get("Name") or "",
-            "Accounting category ID": cid,
-            "Ledger account code": c.get("LedgerAccountCode") or "",
+                        "Ledger account code": c.get("LedgerAccountCode") or "",
             "Classification": c.get("Classification") or "",
-            "Service": ", ".join([n for n in svc_names if n]) or "—",
+            "Service": ", ".join([n for n in svc_names if n]),
         })
     rows.sort(key=lambda x: (x.get("Accounting category") or "").lower())
     return rows
@@ -661,8 +658,7 @@ def build_rate_groups_table(rate_groups: List[Dict[str, Any]]) -> List[Dict[str,
     for g in rate_groups:
         rows.append({
             "Rate group": pick_name(g) or (g.get("Name") or ""),
-            "Rate group ID": g.get("Id") or "",
-            "Activity state": "Active" if g.get("IsActive") else "Inactive",
+                        "Activity state": "Active" if g.get("IsActive") else "Inactive",
         })
     rows.sort(key=lambda x: (x.get("Rate group") or "").lower())
     return rows
@@ -682,15 +678,14 @@ def build_rates_table(rates: List[Dict[str, Any]], rate_groups: List[Dict[str, A
         base = rate_by_id.get(r.get("BaseRateId")) if r.get("BaseRateId") else None
         rg = rg_by_id.get(r.get("GroupId")) if r.get("GroupId") else None
 
-        visibility = "Public" if r.get("IsPublic") else ("Private" if r.get("IsPrivate") else "—")
+        visibility = "Public" if r.get("IsPublic") else "Private"
         status = "Active" if r.get("IsActive") else "Inactive"
         if r.get("IsEnabled") is False:
             status = "Disabled"
 
         rows.append({
             "Rate": rname(r),
-            "Rate ID": r.get("Id") or "",
-            "Base rate": rname(base),
+                        "Base rate": rname(base),
             "Rate group": pick_name(rg) if isinstance(rg, dict) else "",
             "Visibility": visibility,
             "Status": status,
@@ -860,15 +855,6 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
     s = f"Cashiers={len(cashiers)}, Counters={len(counters)}"
     if err_cash:
         s += f" | {err_cash}"
-    accounting_items.append(CheckItem(
-        key="Cash / counters",
-        status=st_cash,
-        summary=s,
-        source="Connector: Cashiers/GetAll + Counters/GetAll",
-        remediation="Ensure cashiers are assigned and counters/numbering comply with local rules.",
-        details={},
-        risk="Medium"
-    ))
     sections.append(("Accounting configuration", accounting_items))
 
     pay_items: List[CheckItem] = []
@@ -1007,13 +993,15 @@ def build_pdf(report: AuditReport) -> bytes:
 
     buf = BytesIO()
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="TitleX", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=20, leading=24, alignment=TA_CENTER, spaceAfter=10))
+    styles.add(ParagraphStyle(name="TitleX", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=20, leading=24, alignment=TA_LEFT, spaceAfter=10))
     styles.add(ParagraphStyle(name="H1X", parent=styles["Heading1"], fontSize=15, leading=18, spaceBefore=10, spaceAfter=6))
     styles.add(ParagraphStyle(name="BodyX", parent=styles["BodyText"], fontSize=9.6, leading=12))
     styles.add(ParagraphStyle(name="SmallX", parent=styles["BodyText"], fontSize=8.6, leading=11))
     styles.add(ParagraphStyle(name="TinyX", parent=styles["BodyText"], fontSize=8.1, leading=10))
 
     logo = fetch_logo()
+
+    TABLE_FULL_W = A4[0] - (16 * mm) - (16 * mm)
 
     doc = SimpleDocTemplate(
         buf,
@@ -1053,7 +1041,16 @@ def build_pdf(report: AuditReport) -> bytes:
         for r in rows:
             data.append([c if isinstance(c, Paragraph) else P(c, "TinyX") for c in r])
 
-        t = LongTable(data, colWidths=col_widths, repeatRows=1)
+        scaled = col_widths
+        try:
+            s = float(sum(col_widths))
+            if s and abs(s - TABLE_FULL_W) > 0.5:
+                scaled = [w * (TABLE_FULL_W / s) for w in col_widths]
+        except Exception:
+            scaled = col_widths
+
+        t = LongTable(data, colWidths=scaled, repeatRows=1)
+        t.hAlign = 'LEFT'
 
         id_cols = set()
         for i, h in enumerate(header):
@@ -1089,15 +1086,16 @@ def build_pdf(report: AuditReport) -> bytes:
         top_y = A4[1] - 10 * mm  # near top margin
         right_x = A4[0] - 16 * mm
 
-        # Logo: same visual height as the title line, top-right on the SAME line
+        # Logo: same visual height as the title line, top-right above the title
         # 12.5pt title text ~= 4.4mm. Give the logo a ~4.8mm height to match.
         target_h = 4.8 * mm
         target_w = 18 * mm  # keep compact so it doesn't collide with the page number
 
         x_logo = right_x - target_w
-        # drawString uses a baseline; align logo vertically with the title's text box.
-        title_y = top_y - 3 * mm
-        y_logo = title_y - (target_h * 0.85)
+        # Logo should be the highest item; title sits beneath it.
+        logo_top = A4[1] - 6 * mm
+        y_logo = logo_top - target_h
+        title_y = y_logo - 6 * mm
 
         if logo:
             try:
@@ -1153,6 +1151,7 @@ def build_pdf(report: AuditReport) -> bytes:
         f"NA: <b>{counts.get('NA',0)}</b>",
         styles["BodyX"]
     ))
+    story.append(Paragraph("<font color='#64748b'><b>Status meanings:</b> PASS = no action required; WARN = review recommended; FAIL = action required; NEEDS_INPUT = data could not be retrieved via API (permissions/endpoint/tenant); NA = not applicable.</font>", styles["BodyX"]))
     story.append(PageBreak())
 
     for sec_name, items in report.sections:
@@ -1175,7 +1174,7 @@ def build_pdf(report: AuditReport) -> bytes:
 
             def render_dict_table(title: str, header: List[str], rows_dicts: List[Dict[str, Any]], colw: List[float], chunk: int = 350):
                 block.append(Paragraph(f"<b>Detail: {esc(title)}</b>", styles["SmallX"]))
-                block.append(Spacer(1, 3))
+                block.append(Spacer(1, 8))
                 rows = [[P(r.get(h, "")) for h in header] for r in rows_dicts]
                 for ch in chunk_list(rows, chunk):
                     block.append(make_long_table(header, ch, colw))
@@ -1184,7 +1183,7 @@ def build_pdf(report: AuditReport) -> bytes:
             if "AccountingCategoriesTable" in details:
                 render_dict_table(
                     "Accounting categories",
-                    ["Accounting category", "Accounting category ID", "Ledger account code", "Classification", "Service"],
+                    ["Accounting category", "Ledger account code", "Classification", "Service"],
                     details.get("AccountingCategoriesTable") or [],
                     [50*mm, 42*mm, 30*mm, 26*mm, 32*mm],
                 )
@@ -1209,7 +1208,7 @@ def build_pdf(report: AuditReport) -> bytes:
             if "RateGroupsTable" in details:
                 render_dict_table(
                     "Rate groups",
-                    ["Rate group", "Rate group ID", "Activity state"],
+                    ["Rate group", "Activity state"],
                     details.get("RateGroupsTable") or [],
                     [86*mm, 58*mm, 32*mm],
                 )
@@ -1217,7 +1216,7 @@ def build_pdf(report: AuditReport) -> bytes:
             if "RatesTable" in details:
                 render_dict_table(
                     "Rates",
-                    ["Rate", "Rate ID", "Base rate", "Rate group", "Visibility", "Status"],
+                    ["Rate", "Base rate", "Rate group", "Visibility", "Status"],
                     details.get("RatesTable") or [],
                     [44*mm, 34*mm, 38*mm, 44*mm, 18*mm, 18*mm],
                 )
@@ -1242,7 +1241,7 @@ def build_pdf(report: AuditReport) -> bytes:
                                  P(str(amt.get("GrossValue") or "")),
                                  P(p.get("CreatedUtc") or "")])
                 block.append(Paragraph("<b>Detail: Payments (30-day sample)</b>", styles["SmallX"]))
-                block.append(Spacer(1, 3))
+                block.append(Spacer(1, 8))
                 for ch in chunk_list(rows, 300):
                     block.append(make_long_table(header, ch, [38*mm, 22*mm, 16*mm, 10*mm, 16*mm, 16*mm, 44*mm]))
                     block.append(Spacer(1, 6))
@@ -1252,32 +1251,42 @@ def build_pdf(report: AuditReport) -> bytes:
                 err_po_charged = (it.details or {}).get("PaymentOriginCharged90dError")
                 err_po_failed = (it.details or {}).get("PaymentOriginFailed90dError")
 
-                def _render_po_table(title: str, rows_in: List[Dict[str, Any]], err: Optional[str]) -> None:
+                def _render_po_table(title: str, rows_in: List[Dict[str, Any]], err: Optional[str], fallback_origins: Optional[List[Dict[str, Any]]] = None) -> None:
                     block.append(Spacer(1, 8))
                     block.append(Paragraph(esc(title), styles["SmallX"]))
-                    block.append(Spacer(1, 4))
-                    if err:
-                        block.append(Paragraph(f"<font color='#ef4444'>NEEDS_INPUT: {esc(err)}</font>", styles["TinyX"]))
-                        return
+                    block.append(Spacer(1, 8))
+
+                    # For Failed/Cancelled, if there are no rows (or the API rejects the requested states),
+                    # we still render a table using the same origins as Charged with Count=0.
+                    if (not rows_in) and fallback_origins:
+                        rows_in = [{"PaymentOrigin": r.get("PaymentOrigin"), "Count": 0} for r in fallback_origins]
+
+                    # If still empty, render a single placeholder row (not an error)
                     if not rows_in:
-                        block.append(Paragraph("<font color='#64748b'>No payments returned for this filter.</font>", styles["TinyX"]))
-                        return
+                        rows_in = [{"PaymentOrigin": "None", "Count": 0}]
+
+                    # Only display NEEDS_INPUT if we have an error and no fallback was provided
+                    if err and not fallback_origins:
+                        block.append(Paragraph(f"<font color='#ef4444'>NEEDS_INPUT: {esc(err)}</font>", styles["TinyX"]))
+                        block.append(Spacer(1, 6))
+
                     header2 = ["PaymentOrigin", "Count"]
-                    rows2 = []
+                    rows2: List[List[Any]] = []
                     for r in rows_in:
                         origin = (r.get("PaymentOrigin") if isinstance(r, dict) else None) or "None"
                         cnt = r.get("Count") if isinstance(r, dict) else ""
-                        rows2.append([P(str(origin)), P(str(cnt))])
-                    block.append(make_long_table(header2, rows2, [82*mm, 24*mm]))
+                        rows2.append([P(origin), P(str(cnt))])
 
-                _render_po_table("Payment Origin (last 90 days) — Charged", po_charged, err_po_charged)
-                _render_po_table("Payment Origin (last 90 days) — Failed / Cancelled", po_failed, err_po_failed)
+                    for ch in chunk_list(rows2, 350):
+                        block.append(make_long_table(header2, ch, [TABLE_FULL_W * 0.75, TABLE_FULL_W * 0.25]))
+                        block.append(Spacer(1, 6))
+
+_render_po_table("Payment Origin (last 90 days) — Charged", po_charged, err_po_charged)
+                _render_po_table("Payment Origin (last 90 days) — Failed / Cancelled", po_failed, err_po_failed, fallback_origins=po_charged)
 
 
             if it.source:
                 block.append(Paragraph(f"<font color='#64748b'><b>Source:</b> {esc(it.source)}</font>", styles["TinyX"]))
-            if it.remediation:
-                block.append(safe_para(f"<b>Recommendation:</b> {esc(it.remediation)}", "SmallX"))
 
             block.append(Spacer(1, 10))
             story.append(KeepTogether(block))
