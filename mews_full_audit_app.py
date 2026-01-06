@@ -37,7 +37,7 @@ PAGE_W, PAGE_H = A4
 from reportlab.lib.units import mm
 DOC_LEFT   = 12 * mm
 DOC_RIGHT  = 12 * mm
-DOC_TOP    = 42 * mm
+DOC_TOP    = 24 * mm
 DOC_BOTTOM = 14 * mm
 TABLE_FULL_W = PAGE_W - DOC_LEFT - DOC_RIGHT
 
