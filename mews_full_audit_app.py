@@ -34,13 +34,13 @@ from reportlab.lib.pagesizes import A4
 
 # --- Page / margin constants ---
 PAGE_W, PAGE_H = A4
+from reportlab.lib.units import mm
 DOC_LEFT   = 12 * mm
 DOC_RIGHT  = 12 * mm
 DOC_TOP    = 14 * mm
 DOC_BOTTOM = 14 * mm
 TABLE_FULL_W = PAGE_W - DOC_LEFT - DOC_RIGHT
 
-from reportlab.lib.units import mm
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT, TA_JUSTIFY
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether
 from reportlab.platypus.tables import LongTable, TableStyle
