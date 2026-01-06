@@ -1251,38 +1251,36 @@ def build_pdf(report: AuditReport) -> bytes:
                 err_po_charged = (it.details or {}).get("PaymentOriginCharged90dError")
                 err_po_failed = (it.details or {}).get("PaymentOriginFailed90dError")
 
-                def _render_po_table(title: str, rows_in: List[Dict[str, Any]], err: Optional[str], fallback_origins: Optional[List[Dict[str, Any]]] = None) -> None:
-                    block.append(Spacer(1, 8))
-                    block.append(Paragraph(esc(title), styles["SmallX"]))
-                    block.append(Spacer(1, 8))
+                def render_po_table(title: str,
+                                    rows_in: Optional[List[Dict[str, Any]]],
+                                    err: Optional[str],
+                                    fallback_origins: Optional[List[Dict[str, Any]]] = None) -> None:
+                    # If failed/cancelled returns nothing or errors, but charged has origins, mirror with zeros.
+                    rows_norm: List[Dict[str, Any]] = list(rows_in or [])
+                    if (not rows_norm) and fallback_origins:
+                        rows_norm = [{"PaymentOrigin": (r.get("PaymentOrigin") or "None"), "Count": 0} for r in fallback_origins]
+                        err = None  # do not show error message per requirement
 
-                    # For Failed/Cancelled, if there are no rows (or the API rejects the requested states),
-                    # we still render a table using the same origins as Charged with Count=0.
-                    if (not rows_in) and fallback_origins:
-                        rows_in = [{"PaymentOrigin": r.get("PaymentOrigin"), "Count": 0} for r in fallback_origins]
+                    block.append(Paragraph(f"<b>Detail: {esc(title)}</b>", styles["SmallX"]))
+                    block.append(Spacer(1, 10))  # extra spacing between title and table
 
-                    # If still empty, render a single placeholder row (not an error)
-                    if not rows_in:
-                        rows_in = [{"PaymentOrigin": "None", "Count": 0}]
+                    header2 = [P("<b>Payment Origin</b>"), P("<b>Count</b>")]
+                    table_rows: List[List[Any]] = []
+                    for r in rows_norm:
+                        table_rows.append([
+                            P(str(r.get("PaymentOrigin") or "None")),
+                            P(str(r.get("Count") if r.get("Count") is not None else 0)),
+                        ])
 
-                    # Only display NEEDS_INPUT if we have an error and no fallback was provided
-                    if err and not fallback_origins:
-                        block.append(Paragraph(f"<font color='#ef4444'>NEEDS_INPUT: {esc(err)}</font>", styles["TinyX"]))
-                        block.append(Spacer(1, 6))
+                    if not table_rows:
+                        table_rows.append([P("No payments returned for this filter."), P("")])
 
-                    header2 = ["PaymentOrigin", "Count"]
-                    rows2: List[List[Any]] = []
-                    for r in rows_in:
-                        origin = (r.get("PaymentOrigin") if isinstance(r, dict) else None) or "None"
-                        cnt = r.get("Count") if isinstance(r, dict) else ""
-                        rows2.append([P(origin), P(str(cnt))])
-
-                    for ch in chunk_list(rows2, 350):
+                    for ch in chunk_list(table_rows, 300):
                         block.append(make_long_table(header2, ch, [TABLE_FULL_W * 0.75, TABLE_FULL_W * 0.25]))
                         block.append(Spacer(1, 6))
 
-            _render_po_table("Payment Origin (last 90 days) — Charged", po_charged, err_po_charged)
-            _render_po_table("Payment Origin (last 90 days) — Failed / Cancelled", po_failed, err_po_failed, fallback_origins=po_charged)
+                render_po_table("Payment Origin (last 90 days) — Charged", po_charged, err_po_charged)
+                render_po_table("Payment Origin (last 90 days) — Failed / Cancelled", po_failed, err_po_failed, fallback_origins=po_charged)
 
 
             if it.source:
