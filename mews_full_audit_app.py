@@ -572,25 +572,41 @@ def build_accounting_categories_table(accounting_categories: List[Dict[str, Any]
     return rows
 
 
-def build_product_mapping_table(products: List[Dict[str, Any]],
-                                accounting_categories: List[Dict[str, Any]],
-                                taxations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_product_mapping_tables(products: List[Dict[str, Any]],
+                                 accounting_categories: List[Dict[str, Any]],
+                                 taxations: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Product mapping table (gross price only).
-    We intentionally do NOT calculate VAT here (per latest requirement).
+    Product mapping tables (gross price only).
+
+    Returns:
+      mapped_rows   : products that have an AccountingCategoryId
+      unmapped_rows : products without an AccountingCategoryId
+
+    Note: We intentionally do NOT calculate VAT here (per latest requirement).
     """
     cat_by_id = {c.get("Id"): c for c in accounting_categories if c.get("Id")}
-    rows: List[Dict[str, Any]] = []
+
+    mapped: List[Dict[str, Any]] = []
+    unmapped: List[Dict[str, Any]] = []
+
     for p in products:
-        cat = cat_by_id.get(p.get("AccountingCategoryId"))
-        rows.append({
+        cat_id = p.get("AccountingCategoryId")
+        cat = cat_by_id.get(cat_id) if cat_id else None
+        row = {
             "Product": pick_name(p) or "",
             "Accounting category": (cat.get("Name") if isinstance(cat, dict) else "UNMAPPED") or "UNMAPPED",
             "Gross price": money_from_extended_amount(p.get("Price")),
             "Charging": p.get("ChargingMode") or "",
-        })
-    rows.sort(key=lambda x: (x.get("Accounting category") or "", x.get("Product") or ""))
-    return rows
+        }
+        if cat_id:
+            mapped.append(row)
+        else:
+            unmapped.append(row)
+
+    mapped.sort(key=lambda x: ((x.get("Accounting category") or ""), (x.get("Product") or "")))
+    unmapped.sort(key=lambda x: (x.get("Product") or ""))
+
+    return mapped, unmapped
 
 
 def build_spaces_table(resources: List[Dict[str, Any]],
@@ -798,7 +814,7 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
     errors = data.get("errors", {}) or {}
 
     acc_categories_table = build_accounting_categories_table(accounting_categories, products, services)
-    product_mapping_table = build_product_mapping_table(products, accounting_categories, taxations)
+    product_mapping_mapped, product_mapping_unmapped = build_product_mapping_tables(products, accounting_categories, taxations)
     spaces_table = build_spaces_table(resources, resource_categories, rca)
     rate_groups_table = build_rate_groups_table(rate_groups)
     rates_table = build_rates_table(rates, rate_groups)
@@ -809,13 +825,11 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
     enterprise_name = ent.get("Name") or "Unknown"
 
     def status_for(keys: List[str], default_ok: str) -> Tuple[str, str]:
-        errs = []
-        for k in keys:
-            if k in errors and errors[k]:
-                errs.append(f"{k}: {errors[k]}")
-        if errs:
-            return "NEEDS_INPUT", " | ".join(errs)
-        return default_ok, ""
+        failed = [k for k in keys if (k in errors and errors[k])]
+        if failed:
+            # Keep main report clean: do not surface raw API error strings here.
+            return "NEEDS_INPUT", "API call failed: " + ", ".join(failed)
+        return default_ok, 
 
     sections: List[Tuple[str, List[CheckItem]]] = []
 
@@ -853,7 +867,7 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
     ))
 
     st_prod, err_prod = status_for(["products_getall", "taxations_getall"], "PASS" if products else "WARN")
-    s = f"Products returned: {len(products)}"
+    s = f"Products returned: {len(products)} | Mapped: {len(product_mapping_mapped)} | Unmapped: {len(product_mapping_unmapped)}"
     if err_prod:
         s += f" | {err_prod}"
     accounting_items.append(CheckItem(
@@ -862,7 +876,7 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
         summary=s,
         source="Connector: Products/GetAll + AccountingCategories/GetAll",
         remediation="Validate each product is mapped to the correct accounting category, uses the intended taxation, and has the correct charging mode.",
-        details={"ProductMappingTable": product_mapping_table},
+        details={"ProductMappingMappedTable": product_mapping_mapped, "ProductMappingUnmappedTable": product_mapping_unmapped},
         risk="High"
     ))
 
@@ -1160,11 +1174,11 @@ def build_pdf(report: AuditReport) -> bytes:
     story.append(Spacer(1, 16))
     story.append(Paragraph("Mews Configuration Audit Report", styles["TitleX"]))
     story.append(Paragraph(
-        f"<b>Enterprise:</b> {esc(report.enterprise_name or 'Unknown')} &nbsp;&nbsp; "
+        f"<b>Enterprise:</b> {esc(report.enterprise_name or 'Unknown')}<br/>"
         f"<b>EnterpriseId:</b> {esc(report.enterprise_id or 'Unknown')}<br/>"
-        f"<b>Generated (UTC):</b> {esc(report.generated_utc.strftime('%d/%m/%Y %H:%M'))} &nbsp;&nbsp; "
-        f"<b>Base URL:</b> {esc(report.base_url)} &nbsp;&nbsp; "
-        f"<b>Client:</b> {esc(report.client_name)}",
+        f"<b>Generated (UTC):</b> {esc(report.generated_utc.strftime('%Y-%m-%d %H:%M:%S'))}<br/>"
+        f"<b>URL:</b> app.mews.com/Commander/{esc(report.enterprise_id or '')}/Dashboard/index<br/>"
+        f"<b>Client:</b> Mews &nbsp;&nbsp; <b>Audit Tool version:</b> 1.0.0",
         styles["BodyX"]
     ))
     story.append(Spacer(1, 10))
@@ -1190,12 +1204,21 @@ def build_pdf(report: AuditReport) -> bytes:
 
     for sec_name, items in report.sections:
         story.append(Paragraph(sec_name, styles["H1X"]))
+        domain_by_section = {
+            "Legal & property baseline": "Legal & Tax",
+            "Accounting configuration": "Accounting & Finance",
+            "Payments": "Payments & Fintech",
+            "Spaces, rates & restrictions": "Revenue & Inventory",
+        }
+        domain = domain_by_section.get(sec_name)
+        if domain:
+            story.append(Paragraph(f"Domain: {esc(domain)}", styles["SmallX"]))
         story.append(Spacer(1, 6))
 
         over_rows = []
         for it in items:
             over_rows.append([P(it.key, "SmallX"), safe_para(badge(it.status), "SmallX"), P(it.risk, "SmallX"), P(it.summary, "SmallX")])
-        story.append(make_long_table(["Check", "Status", "Risk", "Summary"], over_rows, [62*mm, 20*mm, 18*mm, 78*mm]))
+        story.append(make_long_table(["Check", "Status", "Risk", "RawSummary"], over_rows, [62*mm, 20*mm, 18*mm, 78*mm]))
         story.append(Spacer(1, 8))
 
         for it in items:
@@ -1222,11 +1245,19 @@ def build_pdf(report: AuditReport) -> bytes:
                     [50*mm, 42*mm, 30*mm, 26*mm, 32*mm],
                 )
 
-            if "ProductMappingTable" in details:
+            if "ProductMappingMappedTable" in details:
                 render_dict_table(
-                    "Product mapping",
+                    "Mapped products",
                     ["Product", "Accounting category", "Gross price", "Charging"],
-                    details.get("ProductMappingTable") or [],
+                    details.get("ProductMappingMappedTable") or [],
+                    [74*mm, 66*mm, 22*mm, 28*mm],
+                )
+
+            if "ProductMappingUnmappedTable" in details:
+                render_dict_table(
+                    "Unmapped products",
+                    ["Product", "Accounting category", "Gross price", "Charging"],
+                    details.get("ProductMappingUnmappedTable") or [],
                     [74*mm, 66*mm, 22*mm, 28*mm],
                 )
 
@@ -1327,14 +1358,22 @@ def build_pdf(report: AuditReport) -> bytes:
 
     story.append(Paragraph("Appendix: API call log", styles["H1X"]))
     story.append(Spacer(1, 6))
+
     rows = []
     for c in report.api_calls:
-        line = f"{c.operation} | ok={c.ok} | http={c.status_code or ''} | {c.duration_ms}ms"
-        if c.error:
-            line += f" | {c.error}"
-        rows.append([P(line)])
+        rows.append([
+            P(c.operation),
+            P(str(bool(c.ok))),
+            P(str(c.status_code or "")),
+            P(str(c.duration_ms)),
+            P(c.error or ""),
+        ])
+
+    full_w = A4[0] - (32 * mm)
+    colw = [72*mm, 14*mm, 14*mm, 24*mm, full_w - (72*mm + 14*mm + 14*mm + 24*mm)]
+
     for ch in chunk_list(rows, 500):
-        story.append(make_long_table(["Call"], ch, [A4[0] - (32 * mm)]))
+        story.append(make_long_table(["Call", "OK", "http", "duration ms", "Notes"], ch, colw))
         story.append(Spacer(1, 6))
 
     doc.build(story, onFirstPage=header_footer, onLaterPages=header_footer)
