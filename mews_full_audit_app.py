@@ -1054,7 +1054,15 @@ def build_pdf(report: AuditReport) -> bytes:
 
         id_cols = set()
         for i, h in enumerate(header):
-            hl = (h or "").lower()
+
+            # Header cell may be a string or a ReportLab Paragraph.
+            if hasattr(h, "getPlainText"):
+                hl = (h.getPlainText() or "").lower()
+            else:
+                try:
+                    hl = (h or "").lower()
+                except Exception:
+                    hl = str(h).lower()
             if "id" in hl or "uuid" in hl:
                 id_cols.add(i)
 
