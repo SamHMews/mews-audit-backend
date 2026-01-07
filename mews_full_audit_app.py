@@ -829,7 +829,7 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
         if failed:
             # Keep main report clean: do not surface raw API error strings here.
             return "NEEDS_INPUT", "API call failed: " + ", ".join(failed)
-        return default_ok, 
+        return default_ok, ""
 
     sections: List[Tuple[str, List[CheckItem]]] = []
 
