@@ -1,17 +1,3 @@
-# =========================================================
-# mews_full_audit_app.py — Full replacement (v7.1)
-# Start command: gunicorn mews_full_audit_app:app
-# =========================================================
-#
-# v6 changes (per Sam's requirements):
-# - NEEDS_INPUT: Any section where required API calls failed is marked NEEDS_INPUT (and error surfaced)
-# - Product mapping Tax %: uses configured taxation rate (via Taxations/GetAll) when available
-# - Logo: defaults to Mews SVG logo URL if LOGO_URL env var is not set
-# - Spaces & resource categories: fetch ResourceCategories per ServiceId; then fetch Assignments using ResourceCategoryIds
-#   (avoids tenant validation errors and prevents "UNASSIGNED everywhere" when assignments are available)
-#
-# =========================================================
-
 import os
 import time
 import traceback
@@ -244,8 +230,44 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
         rates = fetch_list("rates_getall", "Rates", "GetAll", {"ServiceIds": service_ids}, "Rates")
         products = fetch_list("products_getall", "Products", "GetAll", {"ServiceIds": service_ids}, "Products")
         restrictions = fetch_list("restrictions_getall", "Restrictions", "GetAll", {"ServiceIds": service_ids}, "Restrictions")
+        # Availability blocks (next ~3 months)
+        availability_blocks: List[Dict[str, Any]] = []
+        try:
+            start = utc_now()
+            end = start + timedelta(days=90)
+            payload = {
+                "Extent": {"AvailabilityBlocks": True, "Adjustments": False, "ServiceOrders": False, "Rates": False},
+                "ServiceIds": service_ids,
+                "CollidingUtc": {"StartUtc": start.isoformat().replace("+00:00", "Z"), "EndUtc": end.isoformat().replace("+00:00", "Z")},
+                "ActivityStates": ["Active"],
+                "Limitation": {"Count": 1000},
+            }
+            data_ab = mc.get("AvailabilityBlocks", "GetAll", payload)
+            availability_blocks = data_ab.get("AvailabilityBlocks") or []
+            if not isinstance(availability_blocks, list):
+                availability_blocks = []
+        except Exception as e:
+            errors["availability_blocks_getall"] = str(e)
+            availability_blocks = []
+
+        # Rules (GetAll requires Extent)
+        rules_bundle: Dict[str, Any] = {"Rules": [], "RuleActions": [], "Rates": [], "RateGroups": [], "ResourceCategories": [], "BusinessSegments": []}
+        try:
+            payload = {
+                "ServiceIds": service_ids,
+                "Extent": {"RuleActions": True, "Rates": True, "RateGroups": True, "ResourceCategories": True, "BusinessSegments": True},
+                "Limitation": {"Count": 1000},
+            }
+            data_rules = mc.get("Rules", "GetAll", payload)
+            if isinstance(data_rules, dict):
+                for k in ("Rules", "RuleActions", "Rates", "RateGroups", "ResourceCategories", "BusinessSegments"):
+                    v = data_rules.get(k)
+                    rules_bundle[k] = v if isinstance(v, list) else []
+        except Exception as e:
+            errors["rules_getall"] = str(e)
+
     else:
-        rate_groups, rates, products, restrictions = [], [], [], []
+        rate_groups, rates, products, restrictions, availability_blocks, rules_bundle = [], [], [], [], [], {"Rules": [], "RuleActions": [], "Rates": [], "RateGroups": [], "ResourceCategories": [], "BusinessSegments": []}
         if "services_getall" not in errors:
             errors["services_missing"] = "No ServiceIds found; service-scoped data cannot be retrieved."
 
@@ -370,6 +392,8 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
         "resource_categories": resource_categories,
         "resource_category_assignments": resource_category_assignments,
         "restrictions": restrictions,
+        "availability_blocks": availability_blocks,
+        "rules_bundle": rules_bundle,
         "payments": payments,
         "payment_origin_counts_charged_90d": payment_origin_counts_charged_90d,
         "payment_origin_counts_failed_90d": payment_origin_counts_failed_90d,
@@ -405,6 +429,7 @@ class AuditReport:
     client_name: str
     generated_utc: datetime
     api_calls: List[ApiCall]
+    services_by_id: Dict[str, str]
     sections: List[Tuple[str, List[CheckItem]]]
 
 
@@ -574,7 +599,8 @@ def build_accounting_categories_table(accounting_categories: List[Dict[str, Any]
 
 def build_product_mapping_tables(products: List[Dict[str, Any]],
                                  accounting_categories: List[Dict[str, Any]],
-                                 taxations: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+                                 taxations: List[Dict[str, Any]],
+                                 services: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Product mapping tables (gross price only).
 
@@ -585,6 +611,7 @@ def build_product_mapping_tables(products: List[Dict[str, Any]],
     Note: We intentionally do NOT calculate VAT here (per latest requirement).
     """
     cat_by_id = {c.get("Id"): c for c in accounting_categories if c.get("Id")}
+    svc_by_id = {s.get("Id"): (pick_name(s) or (s.get("Name") or "")) for s in services if isinstance(s, dict) and s.get("Id")}
 
     mapped: List[Dict[str, Any]] = []
     unmapped: List[Dict[str, Any]] = []
@@ -593,27 +620,29 @@ def build_product_mapping_tables(products: List[Dict[str, Any]],
         cat_id = p.get("AccountingCategoryId")
         cat = cat_by_id.get(cat_id) if cat_id else None
         row = {
+            "Service": svc_by_id.get(p.get("ServiceId")) or "",
             "Product": pick_name(p) or "",
             "Accounting category": (cat.get("Name") if isinstance(cat, dict) else "UNMAPPED") or "UNMAPPED",
             "Gross price": money_from_extended_amount(p.get("Price")),
             "Charging": p.get("ChargingMode") or "",
         }
-        if cat_id:
+if cat_id:
             mapped.append(row)
         else:
             unmapped.append(row)
 
-    mapped.sort(key=lambda x: ((x.get("Accounting category") or ""), (x.get("Product") or "")))
-    unmapped.sort(key=lambda x: (x.get("Product") or ""))
+    mapped.sort(key=lambda x: ((x.get("Accounting category") or ""), (x.get("Service") or ""), (x.get("Product") or "")))
+    unmapped.sort(key=lambda x: ((x.get("Service") or ""), (x.get("Product") or "")))
 
     return mapped, unmapped
 
 
 def build_spaces_table(resources: List[Dict[str, Any]],
                        resource_categories: List[Dict[str, Any]],
-                       assignments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+                       assignments: List[Dict[str, Any]],
+                       services: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Build a table of: resource category name, space name, state.
+    Build a table of: service name, resource category name, space name, state.
 
     Mews tenants differ slightly in payload shape for ResourceCategoryAssignments.
     Handle the common variants:
@@ -623,30 +652,26 @@ def build_spaces_table(resources: List[Dict[str, Any]],
     """
     cat_by_id = {c.get("Id"): c for c in resource_categories if isinstance(c, dict) and c.get("Id")}
     res_by_id = {r.get("Id"): r for r in resources if isinstance(r, dict) and r.get("Id")}
+    svc_by_id = {s.get("Id"): pick_name(s) or (s.get("Name") or "") for s in services if isinstance(s, dict) and s.get("Id")}
 
     def get_category_id(a: Dict[str, Any]) -> Optional[str]:
-        cid = a.get("ResourceCategoryId") or a.get("CategoryId") or a.get("ResourceCategory")
-        if isinstance(cid, dict):
-            return cid.get("Id")
-        return cid if isinstance(cid, str) else None
+        for k in ("ResourceCategoryId", "CategoryId"):
+            v = a.get(k)
+            if isinstance(v, str) and v:
+                return v
+        # Some payloads might nest category
+        cat = a.get("ResourceCategory")
+        if isinstance(cat, dict) and isinstance(cat.get("Id"), str):
+            return cat.get("Id")
+        return None
 
     def get_resource_ids(a: Dict[str, Any]) -> List[str]:
-        rid = a.get("ResourceId") or a.get("Resource")
-        if isinstance(rid, dict):
-            rid = rid.get("Id")
-        if isinstance(rid, str):
+        rid = a.get("ResourceId")
+        if isinstance(rid, str) and rid:
             return [rid]
         rids = a.get("ResourceIds")
         if isinstance(rids, list):
-            return [x for x in rids if isinstance(x, str)]
-        # Some shapes use "Resources": [{"Id": ...}, ...]
-        rs = a.get("Resources")
-        if isinstance(rs, list):
-            out = []
-            for x in rs:
-                if isinstance(x, dict) and isinstance(x.get("Id"), str):
-                    out.append(x["Id"])
-            return out
+            return [x for x in rids if isinstance(x, str) and x]
         return []
 
     rows: List[Dict[str, Any]] = []
@@ -656,15 +681,18 @@ def build_spaces_table(resources: List[Dict[str, Any]],
         if not isinstance(a, dict):
             continue
         cid = get_category_id(a)
-        c = cat_by_id.get(cid) if cid else None
-        cat_name = (pick_name(c) or (c.get("Name") if isinstance(c, dict) else "") or "UNASSIGNED") if c else "UNASSIGNED"
-
+        if not cid:
+            continue
+        cat = cat_by_id.get(cid) or {}
+        cat_name = pick_name(cat) or (cat.get("Name") or "")
+        svc_name = svc_by_id.get(cat.get("ServiceId")) or ""
         for rid in get_resource_ids(a):
             r = res_by_id.get(rid)
-            if not r:
+            if not isinstance(r, dict):
                 continue
             assigned_resource_ids.add(rid)
             rows.append({
+                "Service": svc_name,
                 "Resource category": cat_name,
                 "Space": r.get("Name") or "",
                 "State": r.get("State") or "",
@@ -675,29 +703,31 @@ def build_spaces_table(resources: List[Dict[str, Any]],
         rid = r.get("Id")
         if isinstance(rid, str) and rid not in assigned_resource_ids:
             rows.append({
+                "Service": "",
                 "Resource category": "UNASSIGNED",
                 "Space": r.get("Name") or "",
                 "State": r.get("State") or "",
             })
 
-    rows.sort(key=lambda x: (x.get("Resource category") or "", x.get("Space") or ""))
+    rows.sort(key=lambda x: ((x.get("Service") or "").lower(), (x.get("Resource category") or "").lower(), (x.get("Space") or "").lower()))
     return rows
-
-
-def build_rate_groups_table(rate_groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_rate_groups_table(rate_groups: List[Dict[str, Any]], services: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    svc_by_id = {s.get("Id"): pick_name(s) or (s.get("Name") or "") for s in services if isinstance(s, dict) and s.get("Id")}
     rows: List[Dict[str, Any]] = []
     for g in rate_groups:
+        if not isinstance(g, dict):
+            continue
         rows.append({
+            "Service": svc_by_id.get(g.get("ServiceId")) or "",
             "Rate group": pick_name(g) or (g.get("Name") or ""),
-                        "Activity state": "Active" if g.get("IsActive") else "Inactive",
+            "Activity state": "Active" if g.get("IsActive") else "Inactive",
         })
-    rows.sort(key=lambda x: (x.get("Rate group") or "").lower())
+    rows.sort(key=lambda x: ((x.get("Service") or "").lower(), (x.get("Rate group") or "").lower()))
     return rows
-
-
-def build_rates_table(rates: List[Dict[str, Any]], rate_groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    rg_by_id = {g.get("Id"): g for g in rate_groups if g.get("Id")}
-    rate_by_id = {r.get("Id"): r for r in rates if r.get("Id")}
+def build_rates_table(rates: List[Dict[str, Any]], rate_groups: List[Dict[str, Any]], services: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rg_by_id = {g.get("Id"): g for g in rate_groups if isinstance(g, dict) and g.get("Id")}
+    rate_by_id = {r.get("Id"): r for r in rates if isinstance(r, dict) and r.get("Id")}
+    svc_by_id = {s.get("Id"): pick_name(s) or (s.get("Name") or "") for s in services if isinstance(s, dict) and s.get("Id")}
 
     def rname(r: Optional[Dict[str, Any]]) -> str:
         if not isinstance(r, dict):
@@ -706,6 +736,8 @@ def build_rates_table(rates: List[Dict[str, Any]], rate_groups: List[Dict[str, A
 
     rows: List[Dict[str, Any]] = []
     for r in rates:
+        if not isinstance(r, dict):
+            continue
         base = rate_by_id.get(r.get("BaseRateId")) if r.get("BaseRateId") else None
         rg = rg_by_id.get(r.get("GroupId")) if r.get("GroupId") else None
 
@@ -715,65 +747,65 @@ def build_rates_table(rates: List[Dict[str, Any]], rate_groups: List[Dict[str, A
             status = "Disabled"
 
         rows.append({
+            "Service": svc_by_id.get(r.get("ServiceId")) or "",
             "Rate": rname(r),
-                        "Base rate": rname(base),
+            "Base rate": rname(base),
             "Rate group": pick_name(rg) if isinstance(rg, dict) else "",
             "Visibility": visibility,
             "Status": status,
         })
-    rows.sort(key=lambda x: (x.get("Rate group") or "", x.get("Rate") or ""))
+
+    rows.sort(key=lambda x: ((x.get("Service") or "").lower(), (x.get("Rate group") or "").lower(), (x.get("Rate") or "").lower()))
     return rows
-
-
-def summarise_restriction_exceptions(ex: Any) -> str:
-    if not isinstance(ex, dict) or not ex:
-        return "—"
-    bits: List[str] = []
-    for k, label in (("MinAdvance", "Min advance"), ("MaxAdvance", "Max advance"), ("MinLength", "Min length"), ("MaxLength", "Max length")):
-        v = ex.get(k)
-        if v:
-            bits.append(f"{label}: {v}")
-    return "; ".join(bits) if bits else "—"
-
-
-def summarise_restriction_time(cond: Any) -> str:
-    if not isinstance(cond, dict):
-        return "None → None"
-    s = cond.get("StartUtc") or "None"
-    e = cond.get("EndUtc") or "None"
-    days = cond.get("Days")
-    bits = [f"{s} → {e}"]
-    if isinstance(days, list) and days:
-        bits.append("Days: " + ",".join(days))
-    return " | ".join(bits)
-
 
 def build_restrictions_table(restrictions: List[Dict[str, Any]],
                              rates: List[Dict[str, Any]],
                              rate_groups: List[Dict[str, Any]],
-                             resource_categories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+                             resource_categories: List[Dict[str, Any]],
+                             services: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     now = utc_now()
-    rate_by_id = {r.get("Id"): r for r in rates if r.get("Id")}
-    rg_by_id = {g.get("Id"): g for g in rate_groups if g.get("Id")}
-    cat_by_id = {c.get("Id"): c for c in resource_categories if c.get("Id")}
+    rate_by_id = {r.get("Id"): r for r in rates if isinstance(r, dict) and r.get("Id")}
+    rg_by_id = {g.get("Id"): g for g in rate_groups if isinstance(g, dict) and g.get("Id")}
+    cat_by_id = {c.get("Id"): c for c in resource_categories if isinstance(c, dict) and c.get("Id")}
+    svc_by_id = {s.get("Id"): pick_name(s) or (s.get("Name") or "") for s in services if isinstance(s, dict) and s.get("Id")}
+
+    def summarise_restriction_time(cond: Any) -> str:
+        if not isinstance(cond, dict):
+            return "None → None"
+        s = cond.get("StartUtc") or "None"
+        e = cond.get("EndUtc") or "None"
+        days = cond.get("Days")
+        bits = [f"{s} → {e}"]
+        if isinstance(days, list) and days:
+            bits.append("Days: " + ",".join([d for d in days if isinstance(d, str)]))
+        return " | ".join(bits)
 
     rows: List[Dict[str, Any]] = []
     for r in restrictions:
+        if not isinstance(r, dict):
+            continue
         cond = r.get("Conditions") if isinstance(r, dict) else None
         if not isinstance(cond, dict):
             continue
 
-        start = parse_utc(cond.get("StartUtc"))
-        if start and start <= now:
+        # Keep "future stays" concept: end in the future
+        end_utc = cond.get("EndUtc")
+        try:
+            if isinstance(end_utc, str) and end_utc.endswith("Z"):
+                end_dt = datetime.fromisoformat(end_utc.replace("Z", "+00:00"))
+            elif isinstance(end_utc, str):
+                end_dt = datetime.fromisoformat(end_utc)
+            else:
+                end_dt = None
+        except Exception:
+            end_dt = None
+        if end_dt and end_dt < now:
             continue
 
         rate_bits: List[str] = []
-        if cond.get("ExactRateId"):
-            rr = rate_by_id.get(cond.get("ExactRateId"))
-            rate_bits.append("Rate: " + (pick_name(rr) if rr else ""))
-        if cond.get("BaseRateId"):
-            br = rate_by_id.get(cond.get("BaseRateId"))
-            rate_bits.append("Base rate: " + (pick_name(br) if br else ""))
+        if cond.get("RateId"):
+            br = rate_by_id.get(cond.get("RateId"))
+            rate_bits.append("Rate: " + (pick_name(br) if br else ""))
         if cond.get("RateGroupId"):
             g = rg_by_id.get(cond.get("RateGroupId"))
             rate_bits.append("Group: " + (pick_name(g) if g else ""))
@@ -785,14 +817,175 @@ def build_restrictions_table(restrictions: List[Dict[str, Any]],
             spaces_scope = (pick_name(c) if isinstance(c, dict) else "") or "All spaces"
 
         rows.append({
+            "Service": svc_by_id.get(r.get("ServiceId")) or "",
             "Time": summarise_restriction_time(cond),
             "Rates": rates_scope,
             "Spaces": spaces_scope,
             "Exceptions": summarise_restriction_exceptions(r.get("Exceptions")),
         })
 
-    rows.sort(key=lambda x: x.get("Time") or "")
+    rows.sort(key=lambda x: ((x.get("Service") or "").lower(), (x.get("Time") or "").lower(), (x.get("Rates") or "").lower()))
     return rows
+
+def _parse_dt(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        if value.endswith("Z"):
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def _nights_between(start_utc: Any, end_utc: Any, inclusive_end: bool = False) -> str:
+    s = _parse_dt(start_utc)
+    e = _parse_dt(end_utc)
+    if not s or not e:
+        return ""
+    days = (e.date() - s.date()).days
+    if inclusive_end:
+        days = days + 1
+    if days < 0:
+        return ""
+    return str(days)
+
+
+def build_availability_blocks_summary_table(blocks: List[Dict[str, Any]], services: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    svc_by_id = {s.get("Id"): pick_name(s) or (s.get("Name") or "") for s in services if isinstance(s, dict) and s.get("Id")}
+    counts: Dict[str, int] = {}
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        sid = b.get("ServiceId")
+        sname = svc_by_id.get(sid) or ""
+        counts[sname] = counts.get(sname, 0) + 1
+    rows = [{"Service": k, "Availability blocks (next 3 months)": v} for k, v in sorted(counts.items(), key=lambda kv: (kv[0] or "").lower())]
+    return rows
+
+
+def build_availability_blocks_detail_table(blocks: List[Dict[str, Any]], services: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    svc_by_id = {s.get("Id"): pick_name(s) or (s.get("Name") or "") for s in services if isinstance(s, dict) and s.get("Id")}
+    rows: List[Dict[str, Any]] = []
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        service_name = svc_by_id.get(b.get("ServiceId")) or ""
+        name = pick_name(b) or (b.get("Name") or "") or ""
+        # LOS: prefer ArrivalUtc/DepartureUtc; fall back to First/LastTimeUnitStartUtc
+        los = _nights_between(b.get("ArrivalUtc"), b.get("DepartureUtc"), inclusive_end=False)
+        if not los:
+            los = _nights_between(b.get("FirstTimeUnitStartUtc"), b.get("LastTimeUnitStartUtc"), inclusive_end=True)
+        rows.append({
+            "Block": name,
+            "Service": service_name,
+            "LOS (nights)": los,
+            "Reservation purpose": b.get("ReservationPurpose") or "",
+        })
+    rows.sort(key=lambda x: ((x.get("Service") or "").lower(), (x.get("Block") or "").lower()))
+    return rows
+
+
+def build_rules_summary_table(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [{"Service": "All services", "Active rules": len([r for r in rules if isinstance(r, dict)])}]
+
+
+def _format_rule_conditions(conds: Any, maps: Dict[str, Dict[str, str]]) -> str:
+    if not isinstance(conds, dict) or not conds:
+        return ""
+    pretty: List[str] = []
+    for key, label in (
+        ("RateId", "Rate"),
+        ("RateGroupId", "Rate group"),
+        ("BusinessSegmentId", "Business segment"),
+        ("ResourceCategoryId", "Resource category"),
+        ("ResourceCategoryType", "Resource category type"),
+        ("Origin", "Origin"),
+        ("TravelAgencyId", "Company/TA"),
+    ):
+        v = conds.get(key)
+        if not isinstance(v, dict):
+            continue
+        val = v.get("Value")
+        typ = v.get("ConditionType") or ""
+        name_map = maps.get(key) or {}
+        display = name_map.get(val) or (val or "")
+        if display:
+            pretty.append(f"{label} {typ}: {display}".strip())
+    # Min/Max time units
+    for key, label in (("MinimumTimeUnitCount", "Min LOS"), ("MaximumTimeUnitCount", "Max LOS")):
+        v = conds.get(key)
+        if isinstance(v, int):
+            pretty.append(f"{label}: {v}")
+    return " | ".join(pretty)
+
+
+def build_rules_detail_tables(rules: List[Dict[str, Any]],
+                             rule_actions: List[Dict[str, Any]],
+                             services: List[Dict[str, Any]],
+                             rates: List[Dict[str, Any]],
+                             rate_groups: List[Dict[str, Any]],
+                             resource_categories: List[Dict[str, Any]],
+                             business_segments: List[Dict[str, Any]],
+                             products: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    svc_by_id = {s.get("Id"): pick_name(s) or (s.get("Name") or "") for s in services if isinstance(s, dict) and s.get("Id")}
+    rate_by_id = {r.get("Id"): pick_name(r) for r in rates if isinstance(r, dict) and r.get("Id")}
+    rg_by_id = {g.get("Id"): pick_name(g) for g in rate_groups if isinstance(g, dict) and g.get("Id")}
+    rc_by_id = {c.get("Id"): pick_name(c) for c in resource_categories if isinstance(c, dict) and c.get("Id")}
+    bs_by_id = {b.get("Id"): pick_name(b) for b in business_segments if isinstance(b, dict) and b.get("Id")}
+    prod_by_id = {p.get("Id"): pick_name(p) for p in products if isinstance(p, dict) and p.get("Id")}
+
+    maps = {
+        "RateId": rate_by_id,
+        "RateGroupId": rg_by_id,
+        "ResourceCategoryId": rc_by_id,
+        "BusinessSegmentId": bs_by_id,
+    }
+
+    actions_by_rule: Dict[str, List[str]] = {}
+    action_rows: List[Dict[str, Any]] = []
+    rule_service = {r.get('Id'): r.get('ServiceId') for r in rules if isinstance(r, dict) and r.get('Id')}
+    for a in rule_actions:
+        if not isinstance(a, dict):
+            continue
+        rid = a.get("RuleId")
+        data = a.get("Data") or {}
+        disc = data.get("Discriminator") or ""
+        val = data.get("Value") or {}
+        action_desc = ""
+        if disc == "Product" and isinstance(val, dict):
+            pid = val.get("ProductId")
+            at = val.get("ActionType") or ""
+            pname = prod_by_id.get(pid) or (pid or "")
+            action_desc = f"{at} product: {pname}".strip()
+        else:
+            action_desc = disc or "Action"
+
+        if isinstance(rid, str) and rid:
+            actions_by_rule.setdefault(rid, []).append(action_desc)
+
+        action_rows.append({
+            "Service": svc_by_id.get(rule_service.get(rid)) or "",
+            "RuleId": rid or "",
+            "Action": action_desc,
+        })
+
+    rule_rows: List[Dict[str, Any]] = []
+    for r in rules:
+        if not isinstance(r, dict):
+            continue
+        rid = r.get("Id") or ""
+        conds = r.get("Conditions")
+        rule_rows.append({
+            "Service": svc_by_id.get(r.get("ServiceId")) or "",
+            "ServiceId": r.get("ServiceId") or "",
+            "Conditions": _format_rule_conditions(conds, maps),
+            "Actions": "; ".join(actions_by_rule.get(rid) or []),
+        })
+
+    rule_rows.sort(key=lambda x: ((x.get("Service") or "").lower(), (x.get("ServiceId") or "").lower()))
+    action_rows.sort(key=lambda x: ((x.get("Service") or "").lower(), (x.get("RuleId") or "").lower()))
+    return rule_rows, action_rows
 
 
 def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "AuditReport":
@@ -807,6 +1000,8 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
     resource_categories = data.get("resource_categories", []) or []
     rca = data.get("resource_category_assignments", []) or []
     restrictions = data.get("restrictions", []) or []
+    availability_blocks = data.get("availability_blocks", []) or []
+    rules_bundle = data.get("rules_bundle", {}) or {}
     tax_envs = data.get("tax_environments", []) or []
     taxations = data.get("taxations", []) or []
     counters = data.get("counters", []) or []
@@ -814,11 +1009,35 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
     errors = data.get("errors", {}) or {}
 
     acc_categories_table = build_accounting_categories_table(accounting_categories, products, services)
-    product_mapping_mapped, product_mapping_unmapped = build_product_mapping_tables(products, accounting_categories, taxations)
-    spaces_table = build_spaces_table(resources, resource_categories, rca)
-    rate_groups_table = build_rate_groups_table(rate_groups)
-    rates_table = build_rates_table(rates, rate_groups)
-    restrictions_table = build_restrictions_table(restrictions, rates, rate_groups, resource_categories)
+    product_mapping_mapped, product_mapping_unmapped = build_product_mapping_tables(products, accounting_categories, taxations, services)
+    spaces_table = build_spaces_table(resources, resource_categories, rca, services)
+    rate_groups_table = build_rate_groups_table(rate_groups, services)
+    rates_table = build_rates_table(rates, rate_groups, services)
+    restrictions_table = build_restrictions_table(restrictions, rates, rate_groups, resource_categories, services)
+
+    # Availability blocks (next 3 months)
+    availability_blocks_summary_table = build_availability_blocks_summary_table(availability_blocks, services)
+    availability_blocks_detail_table = build_availability_blocks_detail_table(availability_blocks, services)
+
+    # Rules
+    rules = rules_bundle.get("Rules") if isinstance(rules_bundle, dict) else []
+    rule_actions = rules_bundle.get("RuleActions") if isinstance(rules_bundle, dict) else []
+    rules_rates = rules_bundle.get("Rates") if isinstance(rules_bundle, dict) else []
+    rules_rate_groups = rules_bundle.get("RateGroups") if isinstance(rules_bundle, dict) else []
+    rules_resource_categories = rules_bundle.get("ResourceCategories") if isinstance(rules_bundle, dict) else []
+    rules_business_segments = rules_bundle.get("BusinessSegments") if isinstance(rules_bundle, dict) else []
+
+    rules_summary_table = build_rules_summary_table(rules if isinstance(rules, list) else [])
+    rules_detail_table, rule_actions_table = build_rules_detail_tables(
+        rules if isinstance(rules, list) else [],
+        rule_actions if isinstance(rule_actions, list) else [],
+        services,
+        (rules_rates if isinstance(rules_rates, list) and rules_rates else rates),
+        (rules_rate_groups if isinstance(rules_rate_groups, list) and rules_rate_groups else rate_groups),
+        (rules_resource_categories if isinstance(rules_resource_categories, list) and rules_resource_categories else resource_categories),
+        (rules_business_segments if isinstance(rules_business_segments, list) else []),
+        products,
+    )
 
     ent = (cfg.get("Enterprise") or {}) if isinstance(cfg, dict) else {}
     enterprise_id = ent.get("Id") or (data.get("enterprises", [""])[0] if data.get("enterprises") else "")
@@ -1248,59 +1467,103 @@ def build_pdf(report: AuditReport) -> bytes:
             if "ProductMappingMappedTable" in details:
                 render_dict_table(
                     "Mapped products",
-                    ["Product", "Accounting category", "Gross price", "Charging"],
+                    ["Service", "Product", "Accounting category", "Gross price", "Charging"],
                     details.get("ProductMappingMappedTable") or [],
-                    [74*mm, 52*mm, 22*mm, 42*mm],
+                    [30*mm, 60*mm, 40*mm, 22*mm, 40*mm],
                 )
 
             if "ProductMappingUnmappedTable" in details:
                 render_dict_table(
                     "Unmapped products",
-                    ["Product", "Accounting category", "Gross price", "Charging"],
+                    ["Service", "Product", "Accounting category", "Gross price", "Charging"],
                     details.get("ProductMappingUnmappedTable") or [],
-                    [74*mm, 52*mm, 22*mm, 42*mm],
+                    [30*mm, 60*mm, 40*mm, 22*mm, 40*mm],
                 )
 
             if "SpacesTable" in details:
                 render_dict_table(
                     "Spaces and resource categories",
-                    ["Resource category", "Space", "State"],
+                    ["Service", "Resource category", "Space", "State"],
                     details.get("SpacesTable") or [],
-                    [86*mm, 64*mm, 28*mm],
+                    [30*mm, 70*mm, 55*mm, 23*mm],
                     chunk=400,
                 )
 
             if "RateGroupsTable" in details:
                 render_dict_table(
                     "Rate groups",
-                    ["Rate group", "Activity state"],
+                    ["Service", "Rate group", "Activity state"],
                     details.get("RateGroupsTable") or [],
-                    [86*mm, 58*mm, 32*mm],
+                    [32*mm, 96*mm, 50*mm],
                 )
 
             if "RatesTable" in details:
                 render_dict_table(
                     "Rates",
-                    ["Rate", "Base rate", "Rate group", "Visibility", "Status"],
+                    ["Service", "Rate", "Base rate", "Rate group", "Visibility", "Status"],
                     details.get("RatesTable") or [],
-                    [60*mm, 34*mm, 38*mm, 28*mm, 18*mm],
+                    [26*mm, 56*mm, 28*mm, 38*mm, 16*mm, 14*mm],
                 )
 
             if "RestrictionsTable" in details:
                 render_dict_table(
                     "Restrictions (future stays)",
-                    ["Time", "Rates", "Spaces", "Exceptions"],
+                    ["Service", "Time", "Rates", "Spaces", "Exceptions"],
                     details.get("RestrictionsTable") or [],
-                    [46*mm, 54*mm, 38*mm, 46*mm],
+                    [26*mm, 40*mm, 44*mm, 32*mm, 36*mm],
+                )
+
+
+            if "AvailabilityBlocksSummaryTable" in details:
+                render_dict_table(
+                    "Availability blocks (next 3 months)",
+                    ["Service", "Availability blocks (next 3 months)"],
+                    details.get("AvailabilityBlocksSummaryTable") or [],
+                    [120*mm, 58*mm],
+                )
+
+            if "AvailabilityBlocksDetailTable" in details:
+                render_dict_table(
+                    "Availability blocks (detail)",
+                    ["Block", "Service", "LOS (nights)", "Reservation purpose"],
+                    details.get("AvailabilityBlocksDetailTable") or [],
+                    [70*mm, 50*mm, 20*mm, 38*mm],
+                    chunk=400,
+                )
+
+            if "RulesSummaryTable" in details:
+                render_dict_table(
+                    "Rules summary",
+                    ["Service", "Active rules"],
+                    details.get("RulesSummaryTable") or [],
+                    [178*mm],
+                )
+
+            if "RulesDetailTable" in details:
+                render_dict_table(
+                    "Rules (conditions & actions)",
+                    ["Service", "ServiceId", "Conditions", "Actions"],
+                    details.get("RulesDetailTable") or [],
+                    [30*mm, 38*mm, 60*mm, 50*mm],
+                    chunk=250,
+                )
+
+            if "RuleActionsTable" in details:
+                render_dict_table(
+                    "Rule actions",
+                    ["Service", "RuleId", "Action"],
+                    details.get("RuleActionsTable") or [],
+                    [30*mm, 48*mm, 100*mm],
+                    chunk=400,
                 )
 
             if "Payments" in details:
                 pays = details.get("Payments") or []
-                header = ["PaymentId", "Type", "State", "Curr", "Net", "Gross", "CreatedUtc"]
+                header = ["Service", "PaymentId", "Type", "State", "Curr", "Net", "Gross", "CreatedUtc"]
                 rows = []
                 for p in pays:
                     amt = p.get("Amount") or {}
-                    rows.append([P(p.get("Id") or ""), P(p.get("Type") or ""), P(p.get("State") or ""),
+                    rows.append([P((report.services_by_id.get(p.get("ServiceId")) or p.get("ServiceId") or "")), P(p.get("Id") or ""), P(p.get("Type") or ""), P(p.get("State") or ""),
                                  P(amt.get("Currency") or p.get("Currency") or ""),
                                  P(str(amt.get("NetValue") or "")),
                                  P(str(amt.get("GrossValue") or "")),
@@ -1308,7 +1571,7 @@ def build_pdf(report: AuditReport) -> bytes:
                 block.append(Paragraph("<b>Detail: Payments (30-day sample)</b>", styles["SmallX"]))
                 block.append(Spacer(1, 8))
                 for ch in chunk_list(rows, 300):
-                    block.append(make_long_table(header, ch, [38*mm, 22*mm, 16*mm, 10*mm, 16*mm, 16*mm, 44*mm]))
+                    block.append(make_long_table(header, ch, [30*mm, 34*mm, 22*mm, 16*mm, 10*mm, 16*mm, 16*mm, 40*mm]))
                     block.append(Spacer(1, 6))
                 # PaymentOrigin summary tables (last 90 days, count<=1000)
                 po_charged = (it.details or {}).get("PaymentOriginCountsCharged90d") or []
@@ -1329,10 +1592,11 @@ def build_pdf(report: AuditReport) -> bytes:
                     block.append(Paragraph(f"<b>Detail: {esc(title)}</b>", styles["SmallX"]))
                     block.append(Spacer(1, 10))  # extra spacing between title and table
 
-                    header2 = ["Payment origin", "Count"]
+                    header2 = ["Service", "Payment origin", "Count"]
                     table_rows: List[List[Any]] = []
                     for r in rows_norm:
                         table_rows.append([
+                            P("All services"),
                             P(str(r.get("PaymentOrigin") or "None")),
                             P(str(r.get("Count") if r.get("Count") is not None else 0)),
                         ])
@@ -1341,7 +1605,7 @@ def build_pdf(report: AuditReport) -> bytes:
                         table_rows.append([P("No payments returned for this filter."), P("")])
 
                     for ch in chunk_list(table_rows, 300):
-                        block.append(make_long_table(header2, ch, [TABLE_FULL_W * 0.75, TABLE_FULL_W * 0.25]))
+                        block.append(make_long_table(header2, ch, [TABLE_FULL_W * 0.22, TABLE_FULL_W * 0.58, TABLE_FULL_W * 0.20]))
                         block.append(Spacer(1, 6))
 
                 render_po_table("Payment Origin (last 90 days) — Charged", po_charged, err_po_charged)
