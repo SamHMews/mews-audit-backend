@@ -389,7 +389,6 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
                                            {"ServiceIds": service_ids}, "CancellationPolicies")
 
     rules: List[Dict[str, Any]] = []
-    if service_ids:
 
     counters = fetch_list("counters_getall", "Counters", "GetAll",
                           {"EnterpriseIds": enterprises} if enterprises else {}, "Counters")
