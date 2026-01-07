@@ -230,21 +230,41 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
         rates = fetch_list("rates_getall", "Rates", "GetAll", {"ServiceIds": service_ids}, "Rates")
         products = fetch_list("products_getall", "Products", "GetAll", {"ServiceIds": service_ids}, "Products")
         restrictions = fetch_list("restrictions_getall", "Restrictions", "GetAll", {"ServiceIds": service_ids}, "Restrictions")
-        # Availability blocks (next ~3 months)
+        # Availability blocks (next 90 days) — chunk CollidingUtc windows (API enforces a max interval)
         availability_blocks: List[Dict[str, Any]] = []
         try:
             start = utc_now()
             end = start + timedelta(days=90)
-            payload = {
-                "Extent": {"AvailabilityBlocks": True, "Adjustments": False},
-                "CollidingUtc": {"StartUtc": start.isoformat().replace("+00:00", "Z"), "EndUtc": end.isoformat().replace("+00:00", "Z")},
-                "ActivityStates": ["Active"],
-                "Limitation": {"Count": 1000},
-            }
-            data_ab = mc.get("AvailabilityBlocks", "GetAll", payload)
-            availability_blocks = data_ab.get("AvailabilityBlocks") or []
-            if not isinstance(availability_blocks, list):
-                availability_blocks = []
+
+            # The API can reject long CollidingUtc windows; use <=96h chunks for safety.
+            step = timedelta(hours=96)
+            cursor = start
+
+            seen_ids: set[str] = set()
+            while cursor < end:
+                chunk_end = min(cursor + step, end)
+                payload = {
+                    "Extent": {"AvailabilityBlocks": True, "Adjustments": False},
+                    "CollidingUtc": {
+                        "StartUtc": cursor.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "EndUtc": chunk_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    },
+                    "ActivityStates": ["Active"],
+                    "Limitation": {"Count": 1000},
+                }
+                data_ab = mc.get("AvailabilityBlocks", "GetAll", payload)
+                chunk = data_ab.get("AvailabilityBlocks") or []
+                if isinstance(chunk, list):
+                    for b in chunk:
+                        if not isinstance(b, dict):
+                            continue
+                        bid = b.get("Id")
+                        if bid and bid in seen_ids:
+                            continue
+                        if bid:
+                            seen_ids.add(bid)
+                        availability_blocks.append(b)
+                cursor = chunk_end
         except Exception as e:
             errors["availability_blocks_getall"] = str(e)
             availability_blocks = []
@@ -253,7 +273,7 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
         rules_bundle: Dict[str, Any] = {"Rules": [], "RuleActions": [], "Rates": [], "RateGroups": [], "ResourceCategories": [], "BusinessSegments": []}
         try:
             payload = {
-"Extent": {"RuleActions": True, "Rates": True, "RateGroups": True, "ResourceCategories": True, "BusinessSegments": True},
+                "Extent": {"RuleActions": True, "Rates": True, "RateGroups": True, "ResourceCategories": True, "BusinessSegments": True},
                 "Limitation": {"Count": 1000},
             }
             data_rules = mc.get("Rules", "GetAll", payload)
@@ -370,7 +390,6 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
 
     rules: List[Dict[str, Any]] = []
     if service_ids:
-        rules = fetch_list("rules_getall", "Rules", "GetAll", {"ServiceIds": service_ids}, "Rules")
 
     counters = fetch_list("counters_getall", "Counters", "GetAll",
                           {"EnterpriseIds": enterprises} if enterprises else {}, "Counters")
@@ -390,6 +409,8 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
         "resource_categories": resource_categories,
         "resource_category_assignments": resource_category_assignments,
         "restrictions": restrictions,
+        "availability_blocks": availability_blocks,
+        "rules_bundle": rules_bundle,
         "availability_blocks": availability_blocks,
         "rules_bundle": rules_bundle,
         "payments": payments,
