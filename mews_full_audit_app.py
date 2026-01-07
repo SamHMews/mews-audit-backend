@@ -626,7 +626,7 @@ def build_product_mapping_tables(products: List[Dict[str, Any]],
             "Gross price": money_from_extended_amount(p.get("Price")),
             "Charging": p.get("ChargingMode") or "",
         }
-if cat_id:
+        if cat_id:
             mapped.append(row)
         else:
             unmapped.append(row)
