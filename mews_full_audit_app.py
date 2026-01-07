@@ -269,18 +269,97 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
             errors["availability_blocks_getall"] = str(e)
             availability_blocks = []
 
-        # Rules (GetAll requires Extent)
-        rules_bundle: Dict[str, Any] = {"Rules": [], "RuleActions": [], "Rates": [], "RateGroups": [], "ResourceCategories": [], "BusinessSegments": []}
+        # Rules (GetAll requires Extent and ServiceIds)
+        rules_bundle: Dict[str, Any] = {
+            "Rules": [],
+            "RuleActions": [],
+            "Rates": [],
+            "RateGroups": [],
+            "ResourceCategories": [],
+            "BusinessSegments": [],
+        }
         try:
-            payload = {
-                "Extent": {"RuleActions": True, "Rates": True, "RateGroups": True, "ResourceCategories": True, "BusinessSegments": True},
-                "Limitation": {"Count": 1000},
+            if not service_ids:
+                raise ValueError("No ServiceIds available for Rules/GetAll")
+
+            extent = {
+                "RuleActions": True,
+                "Rates": True,
+                "RateGroups": True,
+                "ResourceCategories": True,
+                "BusinessSegments": True,
             }
-            data_rules = mc.get("Rules", "GetAll", payload)
-            if isinstance(data_rules, dict):
-                for k in ("Rules", "RuleActions", "Rates", "RateGroups", "ResourceCategories", "BusinessSegments"):
-                    v = data_rules.get(k)
-                    rules_bundle[k] = v if isinstance(v, list) else []
+
+            # Rules/GetAll requires ServiceIds. To avoid the entire call failing when some services
+            # are out of scope for the token, fetch per-service and merge.
+            errors_per_service: List[str] = []
+
+            seen_rules: set[str] = set()
+            seen_actions: set[str] = set()
+            seen_rates: set[str] = set()
+            seen_rate_groups: set[str] = set()
+            seen_rcats: set[str] = set()
+            seen_segments: set[str] = set()
+
+            for sid in [s for s in service_ids if s]:
+                payload = {
+                    "ServiceIds": [sid],
+                    "Extent": extent,
+                    "Limitation": {"Count": 1000},
+                }
+                try:
+                    data_rules = mc.get("Rules", "GetAll", payload)
+                except Exception as e:
+                    errors_per_service.append(f"{sid}: {e}")
+                    continue
+
+                if not isinstance(data_rules, dict):
+                    continue
+
+                for r in (data_rules.get("Rules") or []):
+                    if isinstance(r, dict):
+                        rid = r.get("Id")
+                        if rid and rid not in seen_rules:
+                            seen_rules.add(rid)
+                            rules_bundle["Rules"].append(r)
+
+                for a in (data_rules.get("RuleActions") or []):
+                    if isinstance(a, dict):
+                        aid = a.get("Id")
+                        if aid and aid not in seen_actions:
+                            seen_actions.add(aid)
+                            rules_bundle["RuleActions"].append(a)
+
+                for rr in (data_rules.get("Rates") or []):
+                    if isinstance(rr, dict):
+                        xid = rr.get("Id")
+                        if xid and xid not in seen_rates:
+                            seen_rates.add(xid)
+                            rules_bundle["Rates"].append(rr)
+
+                for rg in (data_rules.get("RateGroups") or []):
+                    if isinstance(rg, dict):
+                        xid = rg.get("Id")
+                        if xid and xid not in seen_rate_groups:
+                            seen_rate_groups.add(xid)
+                            rules_bundle["RateGroups"].append(rg)
+
+                for rc in (data_rules.get("ResourceCategories") or []):
+                    if isinstance(rc, dict):
+                        xid = rc.get("Id")
+                        if xid and xid not in seen_rcats:
+                            seen_rcats.add(xid)
+                            rules_bundle["ResourceCategories"].append(rc)
+
+                for bs in (data_rules.get("BusinessSegments") or []):
+                    if isinstance(bs, dict):
+                        xid = bs.get("Id")
+                        if xid and xid not in seen_segments:
+                            seen_segments.add(xid)
+                            rules_bundle["BusinessSegments"].append(bs)
+
+            if errors_per_service:
+                errors["rules_getall"] = " | ".join(errors_per_service[:5])
         except Exception as e:
             errors["rules_getall"] = str(e)
 
