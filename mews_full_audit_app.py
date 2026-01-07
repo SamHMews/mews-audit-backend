@@ -1633,7 +1633,7 @@ def build_pdf(report: AuditReport) -> bytes:
                     [30*mm, 88*mm, 60*mm],
                     chunk=250,
                 )
-if "Payments" in details:
+            if "Payments" in details:
                 pays = details.get("Payments") or []
                 header = ["Service", "PaymentId", "Type", "State", "Curr", "Net", "Gross", "CreatedUtc"]
                 rows = []
