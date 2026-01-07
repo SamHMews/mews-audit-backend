@@ -1225,6 +1225,66 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
         details={"RestrictionsTable": restrictions_table},
         risk="Medium"
     ))
+
+    # Availability blocks (next 90 days)
+    availability_blocks = data.get("availability_blocks", []) or []
+    st_ab, err_ab = status_for(["availability_blocks_getall"], "PASS")
+    ab_summary_table = build_availability_blocks_summary_table(availability_blocks, services)
+    ab_detail_table = build_availability_blocks_detail_table(availability_blocks, services)
+    ab_summary = f"Availability blocks (next 90d)={len(availability_blocks)}"
+    if err_ab:
+        ab_summary += f" | {err_ab}"
+    inv_items.append(CheckItem(
+        key="Availability blocks (next 90 days)",
+        status=st_ab,
+        summary=ab_summary,
+        source="Connector: AvailabilityBlocks/GetAll",
+        remediation="Review availability blocks that collide with the next 90 days.",
+        details={
+            "AvailabilityBlocksSummaryTable": ab_summary_table,
+            "AvailabilityBlocksDetailTable": ab_detail_table,
+        },
+        risk="Low"
+    ))
+
+    # Rules
+    rules_bundle = data.get("rules_bundle") or {}
+    rules = rules_bundle.get("Rules") or []
+    rule_actions = rules_bundle.get("RuleActions") or []
+    rules_rate_groups = rules_bundle.get("RateGroups") or []
+    rules_rates = rules_bundle.get("Rates") or []
+    rules_resource_categories = rules_bundle.get("ResourceCategories") or []
+    rules_business_segments = rules_bundle.get("BusinessSegments") or []
+
+    st_rules, err_rules = status_for(["rules_getall"], "PASS")
+    rules_summary_table = build_rules_summary_table(rules)
+    rules_detail_table, rule_actions_table = build_rules_detail_tables(
+        rules=rules,
+        rule_actions=rule_actions,
+        services=services,
+        rates=rules_rates,
+        rate_groups=rules_rate_groups,
+        resource_categories=rules_resource_categories,
+        business_segments=rules_business_segments,
+        products=products,
+    )
+    rules_summary = f"Rules returned: {len(rules)}; Rule actions: {len(rule_actions)}"
+    if err_rules:
+        rules_summary += f" | {err_rules}"
+    inv_items.append(CheckItem(
+        key="Rules",
+        status=st_rules,
+        summary=rules_summary,
+        source="Connector: Rules/GetAll",
+        remediation="Review rule conditions and actions for correctness and scope.",
+        details={
+            "RulesSummaryTable": rules_summary_table,
+            "RulesDetailTable": rules_detail_table,
+            "RuleActionsTable": rule_actions_table,
+        },
+        risk="Low"
+    ))
+
     sections.append(("Spaces, rates & restrictions", inv_items))
 
     calls: List[ApiCall] = []
