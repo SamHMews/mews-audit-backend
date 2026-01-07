@@ -1242,7 +1242,7 @@ def build_pdf(report: AuditReport) -> bytes:
                     "Accounting categories",
                     ["Accounting category", "Ledger account code", "Classification", "Service"],
                     details.get("AccountingCategoriesTable") or [],
-                    [50*mm, 42*mm, 30*mm, 26*mm, 32*mm],
+                    [50*mm, 28*mm, 30*mm, 46*mm],
                 )
 
             if "ProductMappingMappedTable" in details:
@@ -1250,7 +1250,7 @@ def build_pdf(report: AuditReport) -> bytes:
                     "Mapped products",
                     ["Product", "Accounting category", "Gross price", "Charging"],
                     details.get("ProductMappingMappedTable") or [],
-                    [74*mm, 66*mm, 22*mm, 28*mm],
+                    [74*mm, 52*mm, 22*mm, 42*mm],
                 )
 
             if "ProductMappingUnmappedTable" in details:
@@ -1258,7 +1258,7 @@ def build_pdf(report: AuditReport) -> bytes:
                     "Unmapped products",
                     ["Product", "Accounting category", "Gross price", "Charging"],
                     details.get("ProductMappingUnmappedTable") or [],
-                    [74*mm, 66*mm, 22*mm, 28*mm],
+                    [74*mm, 52*mm, 22*mm, 42*mm],
                 )
 
             if "SpacesTable" in details:
@@ -1266,7 +1266,7 @@ def build_pdf(report: AuditReport) -> bytes:
                     "Spaces and resource categories",
                     ["Resource category", "Space", "State"],
                     details.get("SpacesTable") or [],
-                    [66*mm, 84*mm, 28*mm],
+                    [86*mm, 64*mm, 28*mm],
                     chunk=400,
                 )
 
@@ -1283,7 +1283,7 @@ def build_pdf(report: AuditReport) -> bytes:
                     "Rates",
                     ["Rate", "Base rate", "Rate group", "Visibility", "Status"],
                     details.get("RatesTable") or [],
-                    [44*mm, 34*mm, 38*mm, 44*mm, 18*mm, 18*mm],
+                    [60*mm, 34*mm, 38*mm, 28*mm, 18*mm],
                 )
 
             if "RestrictionsTable" in details:
