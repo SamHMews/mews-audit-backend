@@ -1244,6 +1244,7 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
         client_name=client_name,
         generated_utc=utc_now(),
         api_calls=calls,
+        services_by_id=svc_by_id,
         sections=sections,
     )
 
