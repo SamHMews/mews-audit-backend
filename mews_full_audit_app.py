@@ -1018,6 +1018,7 @@ def build_rules_detail_tables(rules: List[Dict[str, Any]],
 def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "AuditReport":
     cfg = data.get("cfg", {}) or {}
     services = data.get("services", []) or []
+    svc_by_id = {s.get("Id"): (pick_name(s) or (s.get("Name") or "")) for s in services if isinstance(s, dict) and s.get("Id")}
     rate_groups = data.get("rate_groups", []) or []
     rates = data.get("rates", []) or []
     accounting_categories = data.get("accounting_categories", []) or []
