@@ -885,7 +885,7 @@ def build_availability_blocks_summary_table(blocks: List[Dict[str, Any]], servic
         sid = b.get("ServiceId")
         sname = svc_by_id.get(sid) or ""
         counts[sname] = counts.get(sname, 0) + 1
-    rows = [{"Service": k, "Availability blocks (next 3 months)": v} for k, v in sorted(counts.items(), key=lambda kv: (kv[0] or "").lower())]
+    rows = [{"Service": k, "Availability blocks (next 90 days)": v} for k, v in sorted(counts.items(), key=lambda kv: (kv[0] or "").lower())]
     return rows
 
 
@@ -1040,7 +1040,7 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
     rates_table = build_rates_table(rates, rate_groups, services)
     restrictions_table = build_restrictions_table(restrictions, rates, rate_groups, resource_categories, services)
 
-    # Availability blocks (next 3 months)
+    # Availability blocks (next 90 days)
     availability_blocks_summary_table = build_availability_blocks_summary_table(availability_blocks, services)
     availability_blocks_detail_table = build_availability_blocks_detail_table(availability_blocks, services)
 
@@ -1602,18 +1602,18 @@ def build_pdf(report: AuditReport) -> bytes:
 
             if "AvailabilityBlocksSummaryTable" in details:
                 render_dict_table(
-                    "Availability blocks (next 3 months)",
-                    ["Service", "Availability blocks (next 3 months)"],
+                    "Availability blocks (next 90 days)",
+                    ["Service", "Availability blocks (next 90 days)"],
                     details.get("AvailabilityBlocksSummaryTable") or [],
-                    [120*mm, 58*mm],
+                    [50*mm, 128*mm],
                 )
 
             if "AvailabilityBlocksDetailTable" in details:
                 render_dict_table(
                     "Availability blocks (detail)",
-                    ["Block", "Service", "LOS (nights)", "Reservation purpose"],
+                    ["Service", "Block", "LOS (nights)", "Reservation purpose"],
                     details.get("AvailabilityBlocksDetailTable") or [],
-                    [70*mm, 50*mm, 20*mm, 38*mm],
+                    [34*mm, 84*mm, 26*mm, 34*mm],
                     chunk=400,
                 )
 
