@@ -780,6 +780,33 @@ def build_restrictions_table(restrictions: List[Dict[str, Any]],
             bits.append("Days: " + ",".join([d for d in days if isinstance(d, str)]))
         return " | ".join(bits)
 
+
+    def summarise_restriction_exceptions(excs: Any) -> str:
+        # Exceptions are usually a list of dicts; keep it short and factual
+        if not isinstance(excs, list) or not excs:
+            return ""
+        out: List[str] = []
+        for e in excs:
+            if not isinstance(e, dict):
+                continue
+            # Try common keys without assuming schema too hard
+            # Examples we see in tenants: Type/Value, Dates, StartUtc/EndUtc, WeekDays etc.
+            typ = e.get("Type") or e.get("ExceptionType") or ""
+            val = e.get("Value") or e.get("Values") or ""
+            s = e.get("StartUtc") or ""
+            en = e.get("EndUtc") or ""
+            if s or en:
+                out.append(f"{typ}:{s}→{en}".strip(":"))
+            elif val:
+                out.append(f"{typ}:{val}".strip(":"))
+            else:
+                # fallback: first couple of keys
+                keys = list(e.keys())[:3]
+                out.append(",".join(keys))
+            if len(out) >= 4:
+                break
+        return " | ".join([x for x in out if x])
+
     rows: List[Dict[str, Any]] = []
     for r in restrictions:
         if not isinstance(r, dict):
