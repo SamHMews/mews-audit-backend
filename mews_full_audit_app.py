@@ -236,8 +236,7 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
             start = utc_now()
             end = start + timedelta(days=90)
             payload = {
-                "Extent": {"AvailabilityBlocks": True, "Adjustments": False, "ServiceOrders": False, "Rates": False},
-                "ServiceIds": service_ids,
+                "Extent": {"AvailabilityBlocks": True, "Adjustments": False},
                 "CollidingUtc": {"StartUtc": start.isoformat().replace("+00:00", "Z"), "EndUtc": end.isoformat().replace("+00:00", "Z")},
                 "ActivityStates": ["Active"],
                 "Limitation": {"Count": 1000},
@@ -254,8 +253,7 @@ def collect_data(base_url: str, client_token: str, access_token: str, client_nam
         rules_bundle: Dict[str, Any] = {"Rules": [], "RuleActions": [], "Rates": [], "RateGroups": [], "ResourceCategories": [], "BusinessSegments": []}
         try:
             payload = {
-                "ServiceIds": service_ids,
-                "Extent": {"RuleActions": True, "Rates": True, "RateGroups": True, "ResourceCategories": True, "BusinessSegments": True},
+"Extent": {"RuleActions": True, "Rates": True, "RateGroups": True, "ResourceCategories": True, "BusinessSegments": True},
                 "Limitation": {"Count": 1000},
             }
             data_rules = mc.get("Rules", "GetAll", payload)
@@ -1005,12 +1003,11 @@ def build_rules_detail_tables(rules: List[Dict[str, Any]],
         conds = r.get("Conditions")
         rule_rows.append({
             "Service": svc_by_id.get(r.get("ServiceId")) or "",
-            "ServiceId": r.get("ServiceId") or "",
             "Conditions": _format_rule_conditions(conds, maps),
             "Actions": "; ".join(actions_by_rule.get(rid) or []),
         })
 
-    rule_rows.sort(key=lambda x: ((x.get("Service") or "").lower(), (x.get("ServiceId") or "").lower()))
+    rule_rows.sort(key=lambda x: ((x.get("Service") or "").lower(), (x.get("Conditions") or "").lower()))
     action_rows.sort(key=lambda x: ((x.get("Service") or "").lower(), (x.get("RuleId") or "").lower()))
     return rule_rows, action_rows
 
@@ -1056,7 +1053,7 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
     rules_business_segments = rules_bundle.get("BusinessSegments") if isinstance(rules_bundle, dict) else []
 
     rules_summary_table = build_rules_summary_table(rules if isinstance(rules, list) else [])
-    rules_detail_table, rule_actions_table = build_rules_detail_tables(
+    rules_detail_table, _rule_actions_table = build_rules_detail_tables(
         rules if isinstance(rules, list) else [],
         rule_actions if isinstance(rule_actions, list) else [],
         services,
@@ -1258,7 +1255,7 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
 
     st_rules, err_rules = status_for(["rules_getall"], "PASS")
     rules_summary_table = build_rules_summary_table(rules)
-    rules_detail_table, rule_actions_table = build_rules_detail_tables(
+    rules_detail_table, _rule_actions_table = build_rules_detail_tables(
         rules=rules,
         rule_actions=rule_actions,
         services=services,
@@ -1280,7 +1277,7 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "Audi
         details={
             "RulesSummaryTable": rules_summary_table,
             "RulesDetailTable": rules_detail_table,
-            "RuleActionsTable": rule_actions_table,
+            
         },
         risk="Low"
     ))
@@ -1631,22 +1628,12 @@ def build_pdf(report: AuditReport) -> bytes:
             if "RulesDetailTable" in details:
                 render_dict_table(
                     "Rules (conditions & actions)",
-                    ["Service", "ServiceId", "Conditions", "Actions"],
+                    ["Service", "Conditions", "Actions"],
                     details.get("RulesDetailTable") or [],
-                    [30*mm, 38*mm, 60*mm, 50*mm],
+                    [30*mm, 88*mm, 60*mm],
                     chunk=250,
                 )
-
-            if "RuleActionsTable" in details:
-                render_dict_table(
-                    "Rule actions",
-                    ["Service", "RuleId", "Action"],
-                    details.get("RuleActionsTable") or [],
-                    [30*mm, 48*mm, 100*mm],
-                    chunk=400,
-                )
-
-            if "Payments" in details:
+if "Payments" in details:
                 pays = details.get("Payments") or []
                 header = ["Service", "PaymentId", "Type", "State", "Curr", "Net", "Gross", "CreatedUtc"]
                 rows = []
