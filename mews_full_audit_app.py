@@ -51,7 +51,6 @@ DEFAULT_API_BASE = os.getenv("MEWS_API_BASE_URL", "https://api.mews-demo.com/api
 #   MEWS_CLIENT_TOKEN_DEMO / MEWS_CLIENT_TOKEN_PRODUCT / MEWS_CLIENT_TOKEN_PRODUCTION
 #
 MEWS_CLIENT_TOKEN_DEMO = (os.getenv("DEMO") or os.getenv("MEWS_CLIENT_TOKEN_DEMO") or "").strip()
-MEWS_CLIENT_TOKEN_PRODUCTION = MEWS_CLIENT_TOKEN_PRODUCT
 
 # Optional: different API bases per environment
 MEWS_API_BASE_DEMO = os.getenv("MEWS_API_BASE_DEMO", DEFAULT_API_BASE).rstrip("/")
@@ -64,6 +63,7 @@ MAX_PDF_MB = int(os.getenv("MAX_PDF_MB", "18"))
 # Prefer setting these as Render environment variables. If you *must* hardcode, replace the "PASTE_..." placeholders below.
 MEWS_CLIENT_TOKEN_DEMO = (os.getenv("DEMO") or os.getenv("MEWS_CLIENT_TOKEN_DEMO") or "").strip()
 MEWS_CLIENT_TOKEN_PRODUCT = (os.getenv("PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCT") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCTION") or "").strip()
+MEWS_CLIENT_TOKEN_PRODUCTION = MEWS_CLIENT_TOKEN_PRODUCT
 
 MEWS_API_BASE_DEMO = os.getenv("MEWS_API_BASE_DEMO", DEFAULT_API_BASE).rstrip("/")
 # If your production base differs, set MEWS_API_BASE_PRODUCT accordingly.
