@@ -42,34 +42,26 @@ from reportlab.graphics import renderPDF
 
 DEFAULT_API_BASE = os.getenv("MEWS_API_BASE_URL", "https://api.mews-demo.com/api/connector/v1").rstrip("/")
 
-# --- Environment-scoped client tokens (Render environment variables) ---
-# Set these in Render under Environment Variables (as per your screenshot):
+# --- Environment routing (frontend selects "Demo" vs "Production") ---
+# Store client tokens in Render environment variables:
 #   DEMO        = <Connector API client token for demo>
-#   PRODUCTION  = <Connector API client token for production>
+#   PRODUCTION  = <Connector API client token for production>  (optional for now)
 #
-# Backwards-compatible aliases are supported:
-#   MEWS_CLIENT_TOKEN_DEMO / MEWS_CLIENT_TOKEN_PRODUCT / MEWS_CLIENT_TOKEN_PRODUCTION
+# Optional overrides:
+#   MEWS_API_BASE_DEMO, MEWS_API_BASE_PRODUCT
 #
 MEWS_CLIENT_TOKEN_DEMO = (os.getenv("DEMO") or os.getenv("MEWS_CLIENT_TOKEN_DEMO") or "").strip()
+MEWS_CLIENT_TOKEN_PRODUCT = (os.getenv("PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCT") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCTION") or "").strip()
 
-# Optional: different API bases per environment
 MEWS_API_BASE_DEMO = os.getenv("MEWS_API_BASE_DEMO", DEFAULT_API_BASE).rstrip("/")
-MEWS_API_BASE_PRODUCTION = MEWS_API_BASE_PRODUCT
+MEWS_API_BASE_PRODUCT = os.getenv("MEWS_API_BASE_PRODUCT", "https://api.mews.com/api/connector/v1").rstrip("/")
+
 DEFAULT_CLIENT_NAME = os.getenv("MEWS_CLIENT_NAME", "Mews Audit Tool 1.0.0")
 DEFAULT_TIMEOUT = int(os.getenv("MEWS_HTTP_TIMEOUT_SECONDS", "30"))
 MAX_PDF_MB = int(os.getenv("MAX_PDF_MB", "18"))
 
-# --- Environment routing (frontend selects "Demo" vs "Product") ---
-# Prefer setting these as Render environment variables. If you *must* hardcode, replace the "PASTE_..." placeholders below.
-MEWS_CLIENT_TOKEN_DEMO = (os.getenv("DEMO") or os.getenv("MEWS_CLIENT_TOKEN_DEMO") or "").strip()
-MEWS_CLIENT_TOKEN_PRODUCT = (os.getenv("PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCT") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCTION") or "").strip()
-MEWS_CLIENT_TOKEN_PRODUCTION = MEWS_CLIENT_TOKEN_PRODUCT
-
-MEWS_API_BASE_DEMO = os.getenv("MEWS_API_BASE_DEMO", DEFAULT_API_BASE).rstrip("/")
-# If your production base differs, set MEWS_API_BASE_PRODUCT accordingly.
-MEWS_API_BASE_PRODUCT = os.getenv("MEWS_API_BASE_PRODUCT", "https://api.mews.com/api/connector/v1").rstrip("/")
-
 ENV_CONFIG = {
+
     "demo": {"base_url": MEWS_API_BASE_DEMO, "client_token": MEWS_CLIENT_TOKEN_DEMO},
     "product": {"base_url": MEWS_API_BASE_PRODUCT, "client_token": MEWS_CLIENT_TOKEN_PRODUCT},
 }
