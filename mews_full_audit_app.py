@@ -45,6 +45,20 @@ DEFAULT_CLIENT_NAME = os.getenv("MEWS_CLIENT_NAME", "Mews Audit Tool 1.0.0")
 DEFAULT_TIMEOUT = int(os.getenv("MEWS_HTTP_TIMEOUT_SECONDS", "30"))
 MAX_PDF_MB = int(os.getenv("MAX_PDF_MB", "18"))
 
+# --- Environment routing (frontend selects "Demo" vs "Product") ---
+# Prefer setting these as Render environment variables. If you *must* hardcode, replace the "PASTE_..." placeholders below.
+MEWS_CLIENT_TOKEN_DEMO = os.getenv("MEWS_CLIENT_TOKEN_DEMO", "E0D439EE522F44368DC78E1BFB03710C-D24FB11DBE31D4621C4817E028D9E1D").strip()
+MEWS_CLIENT_TOKEN_PRODUCT = os.getenv("MEWS_CLIENT_TOKEN_PRODUCT", "PASTE_PRODUCT_CLIENT_TOKEN_HERE").strip()
+
+MEWS_API_BASE_DEMO = os.getenv("MEWS_API_BASE_DEMO", "https://api.mews-demo.com/api/connector/v1").rstrip("/")
+# If your production base differs, set MEWS_API_BASE_PRODUCT accordingly.
+MEWS_API_BASE_PRODUCT = os.getenv("MEWS_API_BASE_PRODUCT", "https://api.mews.com/api/connector/v1").rstrip("/")
+
+ENV_CONFIG = {
+    "demo": {"base_url": MEWS_API_BASE_DEMO, "client_token": MEWS_CLIENT_TOKEN_DEMO},
+    "product": {"base_url": MEWS_API_BASE_PRODUCT, "client_token": MEWS_CLIENT_TOKEN_PRODUCT},
+}
+
 # Default to Mews logo if env var isn't set
 LOGO_URL = (os.getenv("LOGO_URL", "").strip()
             or "https://www.mews.com/hubfs/_Project_Phoenix/images/logo/Mews%20Logo.svg")
@@ -1111,12 +1125,20 @@ def build_rules_detail_tables(rules: List[Dict[str, Any]],
     return rule_rows, action_rows
 
 
-def build_report(data: Dict[str, Any], base_url: str, client_name: str) -> "AuditReport":
+def build_report(data: Dict[str, Any], base_url: str, client_name: str, include_inactive_rates_and_groups: bool = True, environment: str = "demo") -> "AuditReport":
     cfg = data.get("cfg", {}) or {}
     services = data.get("services", []) or []
     svc_by_id = {s.get("Id"): (pick_name(s) or (s.get("Name") or "")) for s in services if isinstance(s, dict) and s.get("Id")}
     rate_groups = data.get("rate_groups", []) or []
     rates = data.get("rates", []) or []
+    # Apply the "Include inactive rates & rate groups" toggle (default: include)
+    if not include_inactive_rates_and_groups:
+        if isinstance(rate_groups, list):
+            rate_groups = [g for g in rate_groups if isinstance(g, dict) and bool(g.get("IsActive"))]
+        if isinstance(rates, list):
+            # "Active" in tables means IsActive==True AND not explicitly disabled (IsEnabled can be False)
+            rates = [r for r in rates if isinstance(r, dict) and bool(r.get("IsActive")) and (r.get("IsEnabled") is not False)]
+
     accounting_categories = data.get("accounting_categories", []) or []
     products = data.get("products", []) or []
     payments = data.get("payments", []) or []
@@ -1862,6 +1884,19 @@ def home():
     return render_template_string(HTML)
 
 
+def parse_bool(v: Any, default: bool = False) -> bool:
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    if s in ("0", "false", "f", "no", "n", "off"):
+        return False
+    return default
+
+
 def _extract_param(name: str) -> Optional[str]:
     if request.is_json:
         v = (request.json or {}).get(name)
@@ -1873,15 +1908,47 @@ def _extract_param(name: str) -> Optional[str]:
 @app.post("/audit")
 def audit():
     try:
-        ct = _extract_param("client_token")
+        # Inputs (supports both JSON and multipart/form-data)
         at = _extract_param("access_token")
-        base_url = _extract_param("base_url") or DEFAULT_API_BASE
 
-        if not ct or not at:
-            return jsonify({"ok": False, "error": "Missing client_token or access_token"}), 400
+        # New: frontend sends environment + include_inactive toggle
+        env = (_extract_param("environment") or _extract_param("env") or "demo").strip().lower()
+        include_inactive = parse_bool(_extract_param("include_inactive"), default=True)
+
+        # Backwards-compatible: allow client_token/base_url to still be posted (e.g. curl)
+        ct = _extract_param("client_token")
+        base_url = _extract_param("base_url")
+
+        # Resolve environment defaults if not provided
+        env_cfg = ENV_CONFIG.get(env)
+        if env_cfg:
+            if not base_url:
+                base_url = env_cfg.get("base_url") or DEFAULT_API_BASE
+            if not ct:
+                ct = env_cfg.get("client_token") or ""
+        else:
+            # Unknown environment -> fall back to defaults
+            if not base_url:
+                base_url = DEFAULT_API_BASE
+
+        if not at:
+            return jsonify({"ok": False, "error": "Missing access_token"}), 400
+
+        if not ct:
+            return jsonify({
+                "ok": False,
+                "error": "Missing client_token for selected environment",
+                "hint": "Set MEWS_CLIENT_TOKEN_DEMO / MEWS_CLIENT_TOKEN_PRODUCT on the backend (or hardcode placeholders)."
+            }), 400
 
         data = collect_data(base_url, ct, at, DEFAULT_CLIENT_NAME)
-        report = build_report(data, base_url, DEFAULT_CLIENT_NAME)
+        report = build_report(
+            data=data,
+            base_url=base_url,
+            client_name=DEFAULT_CLIENT_NAME,
+            include_inactive_rates_and_groups=include_inactive,
+            environment=env,
+        )
         pdf = build_pdf(report)
 
         from io import BytesIO
@@ -1895,7 +1962,6 @@ def audit():
         print("AUDIT ERROR")
         print(err)
         return jsonify({"ok": False, "error": str(e), "trace": err}), 500
-
 
 @app.get("/health")
 def health():
