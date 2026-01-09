@@ -51,27 +51,27 @@ DEFAULT_API_BASE = os.getenv("MEWS_API_BASE_URL", "https://api.mews-demo.com/api
 #   MEWS_CLIENT_TOKEN_DEMO / MEWS_CLIENT_TOKEN_PRODUCT / MEWS_CLIENT_TOKEN_PRODUCTION
 #
 MEWS_CLIENT_TOKEN_DEMO = (os.getenv("DEMO") or os.getenv("MEWS_CLIENT_TOKEN_DEMO") or "").strip()
-MEWS_CLIENT_TOKEN_PRODUCTION = (os.getenv("PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCT") or "").strip()
+MEWS_CLIENT_TOKEN_PRODUCTION = MEWS_CLIENT_TOKEN_PRODUCT
 
 # Optional: different API bases per environment
 MEWS_API_BASE_DEMO = os.getenv("MEWS_API_BASE_DEMO", DEFAULT_API_BASE).rstrip("/")
-MEWS_API_BASE_PRODUCTION = os.getenv("MEWS_API_BASE_PRODUCTION", os.getenv("MEWS_API_BASE_PRODUCT", "https://api.mews.com/api/connector/v1")).rstrip("/")
+MEWS_API_BASE_PRODUCTION = MEWS_API_BASE_PRODUCT
 DEFAULT_CLIENT_NAME = os.getenv("MEWS_CLIENT_NAME", "Mews Audit Tool 1.0.0")
 DEFAULT_TIMEOUT = int(os.getenv("MEWS_HTTP_TIMEOUT_SECONDS", "30"))
 MAX_PDF_MB = int(os.getenv("MAX_PDF_MB", "18"))
 
 # --- Environment routing (frontend selects "Demo" vs "Product") ---
 # Prefer setting these as Render environment variables. If you *must* hardcode, replace the "PASTE_..." placeholders below.
-MEWS_CLIENT_TOKEN_DEMO = os.getenv("MEWS_CLIENT_TOKEN_DEMO", "PASTE_DEMO_CLIENT_TOKEN_HERE").strip()
-MEWS_CLIENT_TOKEN_PRODUCT = os.getenv("MEWS_CLIENT_TOKEN_PRODUCT", "PASTE_PRODUCT_CLIENT_TOKEN_HERE").strip()
+MEWS_CLIENT_TOKEN_DEMO = (os.getenv("DEMO") or os.getenv("MEWS_CLIENT_TOKEN_DEMO") or "").strip()
+MEWS_CLIENT_TOKEN_PRODUCT = (os.getenv("PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCT") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCTION") or "").strip()
 
-MEWS_API_BASE_DEMO = os.getenv("MEWS_API_BASE_DEMO", "https://api.mews-demo.com/api/connector/v1").rstrip("/")
+MEWS_API_BASE_DEMO = os.getenv("MEWS_API_BASE_DEMO", DEFAULT_API_BASE).rstrip("/")
 # If your production base differs, set MEWS_API_BASE_PRODUCT accordingly.
-MEWS_API_BASE_PRODUCT = os.getenv("MEWS_API_BASE_PRODUCT", MEWS_API_BASE_DEMO).rstrip("/")
+MEWS_API_BASE_PRODUCT = os.getenv("MEWS_API_BASE_PRODUCT", "https://api.mews.com/api/connector/v1").rstrip("/")
 
 ENV_CONFIG = {
-    "demo": {"base_url": MEWS_API_BASE_DEMO, "client_token": (os.getenv("DEMO") or os.getenv("MEWS_CLIENT_TOKEN_DEMO") or ""),
-    "product": {"base_url": MEWS_API_BASE_PRODUCT, "client_token": (os.getenv("PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCT") or ""),
+    "demo": {"base_url": MEWS_API_BASE_DEMO, "client_token": MEWS_CLIENT_TOKEN_DEMO},
+    "product": {"base_url": MEWS_API_BASE_PRODUCT, "client_token": MEWS_CLIENT_TOKEN_PRODUCT},
 }
 
 # Default to Mews logo if env var isn't set
@@ -1957,22 +1957,12 @@ def audit():
                 base_url = env_cfg.get("base_url") or DEFAULT_API_BASE
             if not ct:
                 ct = env_cfg.get("client_token") or ""
-# Log selected environment + base URL (safe, no secrets)
+        else:# Log selected environment + base URL (safe, no secrets)
 try:
     app.logger.info("Audit request: environment=%s api_base=%s include_inactive=%s", env, base_url, include_inactive)
 except Exception:
     pass
 
-# Ensure tokens exist (avoid silent all-fail)
-if not ct:
-    return jsonify({
-        "error": "Missing client token for selected environment.",
-        "details": "Set Render environment variable DEMO or PRODUCTION (depending on selection)."
-    }), 400
-if not at:
-    return jsonify({"error": "Missing access token."}), 400
-
-        else:
             # Unknown environment -> fall back to defaults
             if not base_url:
                 base_url = DEFAULT_API_BASE
@@ -2042,7 +2032,7 @@ if not at:
         bio = BytesIO(pdf)
         bio.seek(0)
         fn = f"mews-audit-{report.enterprise_id or 'enterprise'}-{utc_now().strftime('%Y%m%d-%H%M%S')}.pdf"
-        resp = send_file(bio, mimetype="application/pdf", as_attachment=True, download_name=fn)
+                resp = send_file(bio, mimetype="application/pdf", as_attachment=True, download_name=fn)
         # Expose environment/base for debugging (headers only, not in PDF)
         try:
             resp.headers['X-Audit-Environment'] = env
