@@ -1938,6 +1938,11 @@ def _extract_param(name: str) -> Optional[str]:
 
 @app.post("/audit")
 def audit():
+
+# Defaults for safe error handling and headers (avoid NameError on early exits)
+environment = "demo"
+base_url = DEFAULT_API_BASE
+
     try:
         # Inputs (supports both JSON and multipart/form-data)
         at = _extract_param("access_token")
@@ -2029,8 +2034,11 @@ def audit():
         fn = f"mews-audit-{report.enterprise_id or 'enterprise'}-{utc_now().strftime('%Y%m%d-%H%M%S')}.pdf"
         resp = send_file(bio, mimetype="application/pdf", as_attachment=True, download_name=fn)
         # Expose environment/base for debugging (headers only, not in PDF)
-        resp.headers['X-Audit-Environment'] = environment
-        resp.headers['X-Audit-Api-Base'] = base_url
+        try:
+            resp.headers['X-Audit-Environment'] = environment
+            resp.headers['X-Audit-Api-Base'] = base_url
+        except Exception:
+            pass
         return resp
     except Exception as e:
         err = "".join(traceback.format_exception(type(e), e, e.__traceback__))
