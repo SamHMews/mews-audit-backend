@@ -1957,15 +1957,16 @@ def audit():
                 base_url = env_cfg.get("base_url") or DEFAULT_API_BASE
             if not ct:
                 ct = env_cfg.get("client_token") or ""
-        else:# Log selected environment + base URL (safe, no secrets)
-try:
-    app.logger.info("Audit request: environment=%s api_base=%s include_inactive=%s", env, base_url, include_inactive)
-except Exception:
-    pass
-
+        else:
             # Unknown environment -> fall back to defaults
             if not base_url:
                 base_url = DEFAULT_API_BASE
+
+        # Log selected environment + base URL (safe, no secrets)
+        try:
+            app.logger.info("Audit request: environment=%s api_base=%s include_inactive=%s", env, base_url, include_inactive)
+        except Exception:
+            pass
 
         if not at:
             return jsonify({"ok": False, "error": "Missing access_token"}), 400
@@ -2032,7 +2033,7 @@ except Exception:
         bio = BytesIO(pdf)
         bio.seek(0)
         fn = f"mews-audit-{report.enterprise_id or 'enterprise'}-{utc_now().strftime('%Y%m%d-%H%M%S')}.pdf"
-                resp = send_file(bio, mimetype="application/pdf", as_attachment=True, download_name=fn)
+        resp = send_file(bio, mimetype="application/pdf", as_attachment=True, download_name=fn)
         # Expose environment/base for debugging (headers only, not in PDF)
         try:
             resp.headers['X-Audit-Environment'] = env
