@@ -41,18 +41,33 @@ from reportlab.graphics import renderPDF
 # =========================
 
 DEFAULT_API_BASE = os.getenv("MEWS_API_BASE_URL", "https://api.mews-demo.com/api/connector/v1").rstrip("/")
+
+# --- Environment-scoped client tokens (Render environment variables) ---
+# Set these in Render under Environment Variables (as per your screenshot):
+#   DEMO        = <Connector API client token for demo>
+#   PRODUCTION  = <Connector API client token for production>
+#
+# Backwards-compatible aliases are supported:
+#   MEWS_CLIENT_TOKEN_DEMO / MEWS_CLIENT_TOKEN_PRODUCT / MEWS_CLIENT_TOKEN_PRODUCTION
+#
+MEWS_CLIENT_TOKEN_DEMO = (os.getenv("DEMO") or os.getenv("MEWS_CLIENT_TOKEN_DEMO") or "").strip()
+MEWS_CLIENT_TOKEN_PRODUCTION = (os.getenv("PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCT") or "").strip()
+
+# Optional: different API bases per environment
+MEWS_API_BASE_DEMO = os.getenv("MEWS_API_BASE_DEMO", DEFAULT_API_BASE).rstrip("/")
+MEWS_API_BASE_PRODUCTION = os.getenv("MEWS_API_BASE_PRODUCTION", os.getenv("MEWS_API_BASE_PRODUCT", MEWS_API_BASE_DEMO)).rstrip("/")
 DEFAULT_CLIENT_NAME = os.getenv("MEWS_CLIENT_NAME", "Mews Audit Tool 1.0.0")
 DEFAULT_TIMEOUT = int(os.getenv("MEWS_HTTP_TIMEOUT_SECONDS", "30"))
 MAX_PDF_MB = int(os.getenv("MAX_PDF_MB", "18"))
 
 # --- Environment routing (frontend selects "Demo" vs "Product") ---
 # Prefer setting these as Render environment variables. If you *must* hardcode, replace the "PASTE_..." placeholders below.
-MEWS_CLIENT_TOKEN_DEMO = os.getenv("MEWS_CLIENT_TOKEN_DEMO", "E0D439EE522F44368DC78E1BFB03710C-D24FB11DBE31D4621C4817E028D9E1D").strip()
+MEWS_CLIENT_TOKEN_DEMO = os.getenv("MEWS_CLIENT_TOKEN_DEMO", "PASTE_DEMO_CLIENT_TOKEN_HERE").strip()
 MEWS_CLIENT_TOKEN_PRODUCT = os.getenv("MEWS_CLIENT_TOKEN_PRODUCT", "PASTE_PRODUCT_CLIENT_TOKEN_HERE").strip()
 
 MEWS_API_BASE_DEMO = os.getenv("MEWS_API_BASE_DEMO", "https://api.mews-demo.com/api/connector/v1").rstrip("/")
 # If your production base differs, set MEWS_API_BASE_PRODUCT accordingly.
-MEWS_API_BASE_PRODUCT = os.getenv("MEWS_API_BASE_PRODUCT", "https://api.mews.com/api/connector/v1").rstrip("/")
+MEWS_API_BASE_PRODUCT = os.getenv("MEWS_API_BASE_PRODUCT", MEWS_API_BASE_DEMO).rstrip("/")
 
 ENV_CONFIG = {
     "demo": {"base_url": MEWS_API_BASE_DEMO, "client_token": MEWS_CLIENT_TOKEN_DEMO},
@@ -95,6 +110,22 @@ def pick_name(obj: Any) -> str:
                 return str(v)
     return ""
 
+
+def resolve_env_tokens(environment: str) -> Tuple[str, str]:
+    """
+    Map the incoming environment selector to:
+      - api_base_url
+      - client_token
+
+    Frontend sends: environment = "demo" or "product" (legacy value meaning Production).
+    """
+    env = (environment or "").strip().lower()
+    if env in ("production", "prod"):
+        env = "product"
+    if env in ("product", "live"):
+        return (MEWS_API_BASE_PRODUCTION or DEFAULT_API_BASE), MEWS_CLIENT_TOKEN_PRODUCTION
+    # default demo
+    return (MEWS_API_BASE_DEMO or DEFAULT_API_BASE), MEWS_CLIENT_TOKEN_DEMO
 
 def chunk_list(items: List[Any], size: int) -> List[List[Any]]:
     if size <= 0:
@@ -212,7 +243,7 @@ class MewsConnector:
 # DATA COLLECTION (v6)
 # =========================
 
-def collect_data(base_url: str, client_token: str, access_token: str, client_name: str = DEFAULT_CLIENT_NAME) -> Dict[str, Any]:
+def collect_data(base_url, client_token, access_token: str, client_name: str = DEFAULT_CLIENT_NAME) -> Dict[str, Any]:
     mc = MewsConnector(base_url, client_token, access_token, client_name)
     errors: Dict[str, str] = {}
 
