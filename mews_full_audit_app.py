@@ -70,8 +70,8 @@ MEWS_API_BASE_DEMO = os.getenv("MEWS_API_BASE_DEMO", "https://api.mews-demo.com/
 MEWS_API_BASE_PRODUCT = os.getenv("MEWS_API_BASE_PRODUCT", MEWS_API_BASE_DEMO).rstrip("/")
 
 ENV_CONFIG = {
-    "demo": {"base_url": MEWS_API_BASE_DEMO, "client_token": MEWS_CLIENT_TOKEN_DEMO},
-    "product": {"base_url": MEWS_API_BASE_PRODUCT, "client_token": MEWS_CLIENT_TOKEN_PRODUCT},
+    "demo": {"base_url": MEWS_API_BASE_DEMO, "client_token": (os.getenv("DEMO") or os.getenv("MEWS_CLIENT_TOKEN_DEMO") or ""),
+    "product": {"base_url": MEWS_API_BASE_PRODUCT, "client_token": (os.getenv("PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCT") or ""),
 }
 
 # Default to Mews logo if env var isn't set
@@ -1938,11 +1938,6 @@ def _extract_param(name: str) -> Optional[str]:
 
 @app.post("/audit")
 def audit():
-
-# Defaults for safe error handling and headers (avoid NameError on early exits)
-environment = "demo"
-base_url = DEFAULT_API_BASE
-
     try:
         # Inputs (supports both JSON and multipart/form-data)
         at = _extract_param("access_token")
@@ -1962,6 +1957,21 @@ base_url = DEFAULT_API_BASE
                 base_url = env_cfg.get("base_url") or DEFAULT_API_BASE
             if not ct:
                 ct = env_cfg.get("client_token") or ""
+# Log selected environment + base URL (safe, no secrets)
+try:
+    app.logger.info("Audit request: environment=%s api_base=%s include_inactive=%s", env, base_url, include_inactive)
+except Exception:
+    pass
+
+# Ensure tokens exist (avoid silent all-fail)
+if not ct:
+    return jsonify({
+        "error": "Missing client token for selected environment.",
+        "details": "Set Render environment variable DEMO or PRODUCTION (depending on selection)."
+    }), 400
+if not at:
+    return jsonify({"error": "Missing access token."}), 400
+
         else:
             # Unknown environment -> fall back to defaults
             if not base_url:
@@ -2035,7 +2045,7 @@ base_url = DEFAULT_API_BASE
         resp = send_file(bio, mimetype="application/pdf", as_attachment=True, download_name=fn)
         # Expose environment/base for debugging (headers only, not in PDF)
         try:
-            resp.headers['X-Audit-Environment'] = environment
+            resp.headers['X-Audit-Environment'] = env
             resp.headers['X-Audit-Api-Base'] = base_url
         except Exception:
             pass
