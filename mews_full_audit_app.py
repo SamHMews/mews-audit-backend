@@ -55,7 +55,7 @@ MEWS_CLIENT_TOKEN_PRODUCTION = (os.getenv("PRODUCTION") or os.getenv("MEWS_CLIEN
 
 # Optional: different API bases per environment
 MEWS_API_BASE_DEMO = os.getenv("MEWS_API_BASE_DEMO", DEFAULT_API_BASE).rstrip("/")
-MEWS_API_BASE_PRODUCTION = os.getenv("MEWS_API_BASE_PRODUCTION", os.getenv("MEWS_API_BASE_PRODUCT", MEWS_API_BASE_DEMO)).rstrip("/")
+MEWS_API_BASE_PRODUCTION = os.getenv("MEWS_API_BASE_PRODUCTION", os.getenv("MEWS_API_BASE_PRODUCT", "https://api.mews.com/api/connector/v1")).rstrip("/")
 DEFAULT_CLIENT_NAME = os.getenv("MEWS_CLIENT_NAME", "Mews Audit Tool 1.0.0")
 DEFAULT_TIMEOUT = int(os.getenv("MEWS_HTTP_TIMEOUT_SECONDS", "30"))
 MAX_PDF_MB = int(os.getenv("MAX_PDF_MB", "18"))
@@ -1973,6 +1973,47 @@ def audit():
             }), 400
 
         data = collect_data(base_url, ct, at, DEFAULT_CLIENT_NAME)
+
+
+        # If everything failed, return a clean HTTP 400 instead of generating an empty PDF.
+
+        try:
+
+            errs = data.get("errors") or {}
+
+            calls = data.get("api_calls") or []
+
+            all_failed = bool(calls) and all((isinstance(c, dict) and not c.get("ok")) for c in calls)
+
+            if all_failed or ("configuration_get" in errs and errs.get("configuration_get")):
+
+                # Summarise first few call outcomes without leaking secrets
+
+                brief = []
+
+                for c in calls[:5]:
+
+                    if isinstance(c, dict):
+
+                        brief.append(f'{c.get("operation")} -> HTTP {c.get("status_code")}')
+
+                return jsonify({
+
+                    "error": "All API calls failed.",
+
+                    "details": "Common causes: (1) Demo vs Production token mismatch, (2) missing Render env vars DEMO/PRODUCTION, (3) wrong API base for Production. Ensure the access token and client token are from the same environment.",
+
+                    "environment": environment,
+
+                    "api_base": base_url,
+
+                    "first_calls": brief
+
+                }), 400
+
+        except Exception:
+
+            pass
         report = build_report(
             data=data,
             base_url=base_url,
