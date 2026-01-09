@@ -2027,8 +2027,11 @@ def audit():
         bio = BytesIO(pdf)
         bio.seek(0)
         fn = f"mews-audit-{report.enterprise_id or 'enterprise'}-{utc_now().strftime('%Y%m%d-%H%M%S')}.pdf"
-        return send_file(bio, mimetype="application/pdf", as_attachment=True, download_name=fn)
-
+        resp = send_file(bio, mimetype="application/pdf", as_attachment=True, download_name=fn)
+        # Expose environment/base for debugging (headers only, not in PDF)
+        resp.headers['X-Audit-Environment'] = environment
+        resp.headers['X-Audit-Api-Base'] = base_url
+        return resp
     except Exception as e:
         err = "".join(traceback.format_exception(type(e), e, e.__traceback__))
         print("AUDIT ERROR")
