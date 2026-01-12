@@ -1938,102 +1938,114 @@ def _extract_param(name: str) -> Optional[str]:
 @app.post("/lookup")
 def lookup_ids():
     """
-    ID helper endpoint.
+    Lightweight ID lookup helper for the frontend "ID helper" section.
 
-    Returns a list of {name, id} pairs for the requested item type so the frontend
-    can build a payload snippet builder.
+    Expects JSON:
+      - environment: "demo" | "production" (frontend uses "demo" for now)
+      - access_token: Connector API access token (required)
+      - item: one of supported keys below (e.g. "services", "rates", "roomcategories", "products", ...)
     """
     try:
-        body = request.get_json(silent=True) or {}
-        # Frontend may send either JSON body fields or form fields
-        item_key = (body.get("item") or _extract_param("item") or "").strip().lower()
-        env = (_extract_param("environment") or body.get("environment") or "demo").strip().lower()
-        at = (_extract_param("access_token") or body.get("access_token") or "").strip()
+        payload_in = request.get_json(silent=True) or {}
+        env = (payload_in.get("environment") or payload_in.get("env") or "demo").strip().lower()
+        at = (payload_in.get("access_token") or payload_in.get("accessToken") or "").strip()
+        item = (payload_in.get("item") or payload_in.get("type") or "").strip().lower()
 
         if not at:
             return jsonify({"ok": False, "error": "missing_access_token"}), 400
-        if env not in ("demo", "production"):
-            return jsonify({"ok": False, "error": "invalid_environment", "environment": env}), 400
+        if not item:
+            return jsonify({"ok": False, "error": "missing_item"}), 400
 
-        cfg = resolve_env_config(env)
-
-        # demo-safe: only require demo client token; production can be empty if you never select it
-        if env == "demo" and not cfg.get("client_token"):
-            return jsonify({"ok": False, "error": "missing_client_token_demo"}), 500
-
-        conn = MewsConnector(
-            base_url=cfg["base_url"],
-            client_token=cfg.get("client_token") or "",
-            access_token=at,
-            request_id_prefix="lookup",
-        )
-
-        # Supported item keys -> (endpoint, list_key, name_key, id_key)
-        # Some endpoints require a payload; handled below.
+        # Keep this in sync with the frontend buttons.
+        # NOTE: Room Category IDs in the UI map to ResourceCategories in the API.
         catalog = {
-            "services": ("Services/GetAll", "Services", "Name", "Id"),
-            "rates": ("Rates/GetAll", "Rates", "Name", "Id"),
-            "rateids": ("Rates/GetAll", "Rates", "Name", "Id"),  # alias
-            "accountingcategories": ("AccountingCategories/GetAll", "AccountingCategories", "Name", "Id"),
-            "agecategories": ("AgeCategories/GetAll", "AgeCategories", "Name", "Id"),
-            # roomcategories in UI = resource categories in API
-            "roomcategories": ("ResourceCategories/GetAll", "ResourceCategories", "Name", "Id"),
-            "resourcecategories": ("ResourceCategories/GetAll", "ResourceCategories", "Name", "Id"),
-            # products are nested under services; handled specially
-            "products": ("Services/GetAll", "Services", "Name", "Id"),
+            "services": {"endpoint": "Services/GetAll", "list_key": "Services", "name_key": "Name"},
+            "rates": {"endpoint": "Rates/GetAll", "list_key": "Rates", "name_key": "Name"},
+            "roomcategories": {"endpoint": "ResourceCategories/GetAll", "list_key": "ResourceCategories", "name_key": "Name"},
+            "resourcecategories": {"endpoint": "ResourceCategories/GetAll", "list_key": "ResourceCategories", "name_key": "Name"},
+            "products": {"endpoint": "Products/GetAll", "list_key": "Products", "name_key": "Name"},
+            "accountingcategories": {"endpoint": "AccountingCategories/GetAll", "list_key": "AccountingCategories", "name_key": "Name"},
+            "agecategories": {"endpoint": "AgeCategories/GetAll", "list_key": "AgeCategories", "name_key": "Name"},
+            "spaces": {"endpoint": "Resources/GetAll", "list_key": "Resources", "name_key": "Name"},
+            "rooms": {"endpoint": "Resources/GetAll", "list_key": "Resources", "name_key": "Name"},
         }
 
-        if item_key not in catalog:
-            return jsonify({
-                "ok": False,
-                "error": "unsupported_item",
-                "item": item_key,
-                "supported": sorted(catalog.keys()),
-            }), 400
+        if item not in catalog:
+            return jsonify({"ok": False, "error": "unsupported_item", "supported": sorted(catalog.keys())}), 400
 
-        endpoint, list_key, name_key, id_key = catalog[item_key]
+        # Resolve base URL & tokens for the selected environment.
+        cfg = resolve_env_tokens(env)
+        base_url = cfg["api_base"]
 
-        # Build payloads for endpoints that need them
-        payload = {}
+        # Create connector. Some historical versions of MewsConnector used different init signatures;
+        # to be safe, we only pass access_token and base_url here.
+        conn = MewsConnector(access_token=at, api_base=base_url)
 
-        # ResourceCategories/GetAll requires ServiceIds (at least in some environments)
-        if item_key in ("roomcategories", "resourcecategories"):
+        endpoint = catalog[item]["endpoint"]
+        list_key = catalog[item]["list_key"]
+        name_key = catalog[item].get("name_key", "Name")
+
+        # Build request body per endpoint requirements.
+        req_body = {}
+
+        # Endpoints that require Limitation (some tenants reject empty payloads).
+        if endpoint in ("Rates/GetAll",):
+            req_body = {"Limitation": {"Count": 1000, "Offset": 0}}
+
+        # Endpoints that require ServiceIds (Room categories + sometimes products).
+        if endpoint in ("ResourceCategories/GetAll", "Products/GetAll"):
             services_data = conn._post("Services/GetAll", {})
             service_ids = [s.get("Id") for s in (services_data.get("Services") or []) if s.get("Id")]
-            payload = {"ServiceIds": service_ids}
+            if not service_ids:
+                return jsonify({
+                    "ok": False,
+                    "error": "no_services_found",
+                    "environment": env,
+                    "api_base": base_url
+                }), 200
+            req_body = {**req_body, "ServiceIds": service_ids}
 
-        data = conn._post(endpoint, payload)
+        # Perform request
+        data = conn._post(endpoint, req_body)
 
+        raw_list = data.get(list_key) or []
         items = []
+        for obj in raw_list:
+            if not isinstance(obj, dict):
+                continue
+            oid = obj.get("Id") or obj.get("id")
+            if not oid:
+                continue
+            items.append({
+                "id": oid,
+                "name": obj.get(name_key) or obj.get("Name") or obj.get("Code") or ""
+            })
 
-        if item_key == "products":
-            # Services -> Products (flatten)
-            for svc in (data.get("Services") or []):
-                for p in (svc.get("Products") or []):
-                    pid = p.get("Id")
-                    if not pid:
-                        continue
-                    items.append({"name": p.get("Name") or "(Unnamed product)", "id": pid})
-        else:
-            for row in (data.get(list_key) or []):
-                rid = row.get(id_key)
-                if not rid:
-                    continue
-                items.append({"name": row.get(name_key) or "(Unnamed)", "id": rid})
+        # Defensive serialisation: conn.calls may contain dicts or objects depending on the version.
+        calls_out = []
+        for c in getattr(conn, "calls", []) or []:
+            if isinstance(c, dict):
+                calls_out.append(c)
+            elif hasattr(c, "as_dict"):
+                calls_out.append(c.as_dict())
+            else:
+                calls_out.append({"call": str(c)})
 
         return jsonify({
             "ok": True,
             "environment": env,
-            "api_base": cfg["base_url"],
-            "item": item_key,
+            "api_base": base_url,
+            "item": item,
             "count": len(items),
             "items": items,
-            "calls": conn.calls,
+            "calls": calls_out,
         })
 
     except Exception as e:
+        # Never 500 the UI for lookup; return a usable error payload.
         app.logger.exception("LOOKUP ERROR")
-        return jsonify({"ok": False, "error": "lookup_failed", "details": str(e)}), 500
+        return jsonify({"ok": False, "error": "lookup_exception", "message": str(e)}), 500
+
 @app.post("/audit")
 def audit():
     try:
