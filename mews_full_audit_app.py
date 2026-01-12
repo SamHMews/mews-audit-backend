@@ -1,7 +1,7 @@
+import logging
 import os
 import time
 import traceback
-import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -1932,155 +1932,182 @@ def _extract_param(name: str) -> Optional[str]:
 
 @app.post("/lookup")
 def lookup_ids():
-    """Lightweight helper endpoint for the frontend 'ID helper'.
+    """Lookup helper: fetch IDs for common objects to support the frontend ID Helper.
 
-    Expects JSON:
-      { "environment": "demo|sandbox|production|...", "access_token": "...", "item": "<key>" }
-
-    Returns:
-      { ok: True, items: [{name,id}, ...], calls: [...] }
+    Defensive by design: never throws HTML; returns JSON even on errors.
     """
     try:
         payload = request.get_json(silent=True) or {}
-        env = (payload.get("environment") or "demo").strip().lower()
-        at = (payload.get("access_token") or payload.get("accessToken") or "").strip()
-        item = (payload.get("item") or "").strip().lower()
+        # also support form-encoded fallback (older frontend)
+        def pget(k: str):
+            v = payload.get(k)
+            if v is None and request.form:
+                v = request.form.get(k)
+            return v
+
+        env = (pget("environment") or pget("env") or "demo")
+        env = str(env).strip().lower()
+        at = (pget("access_token") or pget("accessToken") or pget("token") or "")
+        at = str(at).strip()
+        item = (pget("item") or pget("type") or "")
+        item = str(item).strip().lower()
 
         if not at:
             return jsonify({"ok": False, "error": "missing_access_token"}), 400
         if not item:
             return jsonify({"ok": False, "error": "missing_item"}), 400
 
-        # Backwards-compatible: some earlier versions used resolve_env_tokens() only.
-                # Resolve API base + client token for selected environment
-        base_url, client_token = resolve_env_tokens(env)
-        conn = MewsConnector(base_url=base_url, client_token=client_token, access_token=at)
+        # Resolve environment config across older/newer helper functions
+        cfg = None
+        if "resolve_env_config" in globals():
+            cfg = resolve_env_config(env)  # type: ignore[name-defined]
+        elif "resolve_env_tokens" in globals():
+            cfg = resolve_env_tokens(env)  # type: ignore[name-defined]
+        elif "ENV_CONFIG" in globals():
+            cfg = ENV_CONFIG.get(env)  # type: ignore[name-defined]
 
-supported = {
+        # Some legacy resolvers return (cfg, extra). Normalise.
+        if isinstance(cfg, tuple) and len(cfg) >= 1:
+            cfg = cfg[0]
+        if cfg is None:
+            cfg = {}
+
+        base_url = None
+        if isinstance(cfg, dict):
+            base_url = cfg.get("api_base") or cfg.get("base_url") or cfg.get("apiBase") or cfg.get("api_base_url")
+
+        conn = MewsConnector(access_token=at, base_url=base_url) if base_url else MewsConnector(access_token=at)
+
+        supported = {
             "services",
             "serviceids",
             "rates",
             "rateids",
-            "products",
-            "roomcategories",
-            "resourcecategories",
             "accountingcategories",
             "accountingcategoryids",
+            "roomcategories",
+            "roomcategoryids",
+            "products",
+            "productids",
             "agecategories",
             "agecategoryids",
         }
         if item not in supported:
             return jsonify({"ok": False, "error": f"unsupported_item:{item}", "supported": sorted(supported)}), 400
 
-        def normalise_rows(data: dict) -> list:
-            # Common list keys used across Mews endpoints
-            for k in (
-                "Services",
-                "Rates",
-                "RateGroups",
-                "Products",
-                "ResourceCategories",
-                "RoomCategories",
-                "AccountingCategories",
-                "AgeCategories",
-                "Resources",
-                "Items",
-            ):
+        def extract_rows(data: dict, keys: list[str]) -> list[dict]:
+            for k in keys:
                 v = data.get(k)
                 if isinstance(v, list):
                     return v
-            # Sometimes wrapped in 'Data'
             v = data.get("Data")
             if isinstance(v, list):
                 return v
             return []
 
-        def get_id(row: dict) -> str:
-            for k in ("Id", "ID", "id"):
-                v = row.get(k)
-                if isinstance(v, str) and v:
-                    return v
-            return ""
+        def normalise_rows(rows: list[dict], id_keys: list[str], name_keys: list[str]) -> list[dict]:
+            out = []
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                rid = None
+                for k in id_keys:
+                    if r.get(k):
+                        rid = r.get(k)
+                        break
+                if not rid:
+                    continue
+                nm = None
+                for k in name_keys:
+                    if r.get(k):
+                        nm = r.get(k)
+                        break
+                if not nm or str(nm).strip() == str(rid).strip():
+                    nm = r.get("Code") or r.get("Abbreviation") or r.get("Number") or r.get("Description") or str(rid)
+                out.append({"id": rid, "name": nm})
+            return out
 
-        def get_name(row: dict) -> str:
-            for k in ("Name", "name", "Title", "title", "Code", "code"):
-                v = row.get(k)
-                if isinstance(v, str) and v:
-                    return v
-            return get_id(row)
+        def try_post(paths: list[str], body: dict) -> dict:
+            last = None
+            for p in paths:
+                try:
+                    return conn._post(p, body)
+                except Exception as e:
+                    last = e
+            raise last  # type: ignore[misc]
 
-        # Some endpoints (ResourceCategories / Products in certain setups) require ServiceIds.
-        services_cache = None
+        # Pre-fetch services (some endpoints require ServiceIds)
+        services_rows = []
+        try:
+            svc_data = conn._post("Services/GetAll", {})
+            services_rows = extract_rows(svc_data, ["Services"])
+        except Exception:
+            services_rows = []
 
-        def ensure_service_ids() -> list:
-            nonlocal services_cache
-            if services_cache is not None:
-                return services_cache
-            data = conn._post("Services/GetAll", {})
-            rows = normalise_rows(data)
-            services_cache = [get_id(r) for r in rows if get_id(r)]
-            return services_cache
+        svc_ids = [s.get("Id") for s in services_rows if isinstance(s, dict) and s.get("Id")]
+        svc_id_any = svc_ids[0] if svc_ids else None
 
-        endpoint = None
-        req_body = {}
+        items: list[dict] = []
 
         if item in ("services", "serviceids"):
-            endpoint = "Services/GetAll"
+            items = normalise_rows(services_rows, ["Id"], ["Name"])
+
         elif item in ("rates", "rateids"):
-            endpoint = "Rates/GetAll"
+            data = conn._post("Rates/GetAll", {})
+            rows = extract_rows(data, ["Rates"])
+            items = normalise_rows(rows, ["Id"], ["Name"])
+
         elif item in ("accountingcategories", "accountingcategoryids"):
-            endpoint = "AccountingCategories/GetAll"
+            data = conn._post("AccountingCategories/GetAll", {})
+            rows = extract_rows(data, ["AccountingCategories"])
+            items = normalise_rows(rows, ["Id"], ["Name"])
+
         elif item in ("agecategories", "agecategoryids"):
-            endpoint = "AgeCategories/GetAll"
-        elif item in ("products",):
-            endpoint = "Products/GetAll"
-            svc_ids = ensure_service_ids()
-            if svc_ids:
-                req_body = {"ServiceIds": svc_ids}
-        elif item in ("roomcategories", "resourcecategories"):
-            # In practice this is ResourceCategories in Connector API.
-            endpoint = "ResourceCategories/GetAll"
-            svc_ids = ensure_service_ids()
-            if svc_ids:
-                req_body = {"ServiceIds": svc_ids}
-        else:
-            # should be unreachable due to supported set
-            return jsonify({"ok": False, "error": f"unsupported_item:{item}"}), 400
+            data = conn._post("AgeCategories/GetAll", {})
+            rows = extract_rows(data, ["AgeCategories"])
+            items = normalise_rows(rows, ["Id"], ["Name"])
 
-        data = conn._post(endpoint, req_body)
-        rows = normalise_rows(data)
+        elif item in ("roomcategories", "roomcategoryids"):
+            # Prefer RoomCategories/GetAll, fallback to ResourceCategories/GetAll with ServiceIds
+            try:
+                data = conn._post("RoomCategories/GetAll", {})
+            except Exception:
+                body = {"ServiceIds": [svc_id_any]} if svc_id_any else {}
+                data = conn._post("ResourceCategories/GetAll", body)
+            rows = extract_rows(data, ["RoomCategories", "ResourceCategories", "Categories"])
+            items = normalise_rows(rows, ["Id"], ["Name"])
 
-        items = []
-        for r in rows:
-            if not isinstance(r, dict):
-                continue
-            _id = get_id(r)
-            if not _id:
-                continue
-            items.append({"id": _id, "name": get_name(r)})
+        elif item in ("products", "productids"):
+            # Products may require ServiceIds
+            try:
+                data = conn._post("Products/GetAll", {})
+            except Exception:
+                body = {"ServiceIds": [svc_id_any]} if svc_id_any else {}
+                data = try_post(["Products/GetAll", "ServiceProducts/GetAll"], body)
+            rows = extract_rows(data, ["Products", "ServiceProducts", "Items"])
+            items = normalise_rows(rows, ["Id"], ["Name"])
 
-        # Calls log may contain dicts already in some versions.
+        # Safe call-log serialisation
         calls = []
         try:
             for c in getattr(conn, "calls", []) or []:
                 if isinstance(c, dict):
                     calls.append(c)
                 elif hasattr(c, "as_dict"):
-                    calls.append(c.as_dict())  # type: ignore[attr-defined]
+                    calls.append(c.as_dict())
                 else:
-                    calls.append({"value": str(c)})
+                    calls.append({"path": getattr(c, "path", None), "status": getattr(c, "status", None)})
         except Exception:
             calls = []
 
         return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": calls})
+    except Exception as e:
+        logging.exception("LOOKUP ERROR")
+        return jsonify({"ok": False, "error": "lookup_failed", "details": str(e)}), 500
 
-    except Exception:
-        try:
-            logging.exception("LOOKUP ERROR")
-        except Exception:
-            pass
-        return jsonify({"ok": False, "error": "lookup_failed"}), 500
 
+
+@app.post("/audit")
 def audit():
     try:
         # Inputs (supports both JSON and multipart/form-data)
