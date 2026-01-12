@@ -120,6 +120,12 @@ def resolve_env_tokens(environment: str) -> Tuple[str, str]:
     # default demo
     return (MEWS_API_BASE_DEMO or DEFAULT_API_BASE), MEWS_CLIENT_TOKEN_DEMO
 
+
+def resolve_env_config(environment: str) -> dict:
+    """Backwards-compatible alias used by /lookup and other routes."""
+    return resolve_env_tokens(environment)
+
+
 def chunk_list(items: List[Any], size: int) -> List[List[Any]]:
     if size <= 0:
         return [items]
