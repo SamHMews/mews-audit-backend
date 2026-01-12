@@ -152,42 +152,44 @@ class MewsConnector:
         self.calls: List[ApiCall] = []
 
     def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"{self.base_url}/{path.lstrip('/')}"
-        body = dict(payload)
-        body.setdefault("ClientToken", self.client_token)
-        body.setdefault("AccessToken", self.access_token)
-        body.setdefault("Client", self.client_name)
-
+        
+        """POST to the Connector API.
+        Always returns a dict. If the response isn't JSON or isn't 2xx, we still return a dict
+        with diagnostic metadata under keys prefixed with '_' so callers can decide how to handle it.
+        """
+        url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": self.access_token,
+            "X-ClientToken": self.client_token,
+        }
         t0 = time.time()
-        resp = None
+        status = None
+        resp_text = ""
         try:
-            resp = requests.post(url, json=body, timeout=DEFAULT_TIMEOUT)
-            dt = int((time.time() - t0) * 1000)
-
+            resp = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+            status = resp.status_code
+            resp_text = resp.text or ""
             try:
-                data = resp.json()
+                data: Any = resp.json()
             except Exception:
-                data = {"_raw": resp.text}
-
-            self.calls.append(ApiCall(
-                operation=path,
-                ok=bool(resp.ok),
-                status_code=resp.status_code,
-                duration_ms=dt,
-                error=None if resp.ok else (data.get("Message") if isinstance(data, dict) else str(data))
-            ))
-
-            if not resp.ok:
-                raise RuntimeError(f"HTTP {resp.status_code} for {path}: {data}")
-            if not isinstance(data, dict):
-                raise RuntimeError(f"Unexpected JSON shape for {path}: {type(data)}")
-            return data
+                data = {"_non_json_body": resp_text[:4000]}
+        
+            if isinstance(data, dict):
+                meta = data.get("_meta") if isinstance(data.get("_meta"), dict) else {}
+                meta.update({"url": url, "path": path, "status": status, "ok": bool(getattr(resp, "ok", False))})
+                data["_meta"] = meta
+            else:
+                data = {"_meta": {"url": url, "path": path, "status": status, "ok": bool(getattr(resp, "ok", False))},
+                        "_non_dict_json": True, "value": data}
+            return data  # type: ignore[return-value]
         except Exception as e:
-            dt = int((time.time() - t0) * 1000)
-            if resp is None:
-                self.calls.append(ApiCall(operation=path, ok=False, status_code=None, duration_ms=dt, error=str(e)))
-            raise
-
+            return {"_meta": {"url": url, "path": path, "status": status, "ok": False},
+                    "_exception": f"{type(e).__name__}: {e}", "_body": resp_text[:2000]}
+        finally:
+            dt_ms = int((time.time() - t0) * 1000)
+            self.calls.append({"path": path, "url": url, "ms": dt_ms, "status": status,
+                               "ok": status is not None and 200 <= status < 300})
     def get(self, domain: str, operation: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._post(f"{domain}/{operation}", payload)
 
