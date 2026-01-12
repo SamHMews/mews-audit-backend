@@ -5,23 +5,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-def serialize_call_log(calls):
-    """Return a JSON-safe list for the API call log."""
-    out = []
-    for c in calls or []:
-        if isinstance(c, dict):
-            out.append(c)
-        elif hasattr(c, "as_dict"):
-            try:
-                out.append(c.as_dict())
-            except Exception:
-                out.append({"event": str(c)})
-        else:
-            out.append({"event": str(c)})
-    return out
-
-
-
 import requests
 from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
@@ -169,44 +152,42 @@ class MewsConnector:
         self.calls: List[ApiCall] = []
 
     def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        
-        """POST to the Connector API.
-        Always returns a dict. If the response isn't JSON or isn't 2xx, we still return a dict
-        with diagnostic metadata under keys prefixed with '_' so callers can decide how to handle it.
-        """
-        url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": self.access_token,
-            "X-ClientToken": self.client_token,
-        }
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        body = dict(payload)
+        body.setdefault("ClientToken", self.client_token)
+        body.setdefault("AccessToken", self.access_token)
+        body.setdefault("Client", self.client_name)
+
         t0 = time.time()
-        status = None
-        resp_text = ""
+        resp = None
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
-            status = resp.status_code
-            resp_text = resp.text or ""
+            resp = requests.post(url, json=body, timeout=DEFAULT_TIMEOUT)
+            dt = int((time.time() - t0) * 1000)
+
             try:
-                data: Any = resp.json()
+                data = resp.json()
             except Exception:
-                data = {"_non_json_body": resp_text[:4000]}
-        
-            if isinstance(data, dict):
-                meta = data.get("_meta") if isinstance(data.get("_meta"), dict) else {}
-                meta.update({"url": url, "path": path, "status": status, "ok": bool(getattr(resp, "ok", False))})
-                data["_meta"] = meta
-            else:
-                data = {"_meta": {"url": url, "path": path, "status": status, "ok": bool(getattr(resp, "ok", False))},
-                        "_non_dict_json": True, "value": data}
-            return data  # type: ignore[return-value]
+                data = {"_raw": resp.text}
+
+            self.calls.append(ApiCall(
+                operation=path,
+                ok=bool(resp.ok),
+                status_code=resp.status_code,
+                duration_ms=dt,
+                error=None if resp.ok else (data.get("Message") if isinstance(data, dict) else str(data))
+            ))
+
+            if not resp.ok:
+                raise RuntimeError(f"HTTP {resp.status_code} for {path}: {data}")
+            if not isinstance(data, dict):
+                raise RuntimeError(f"Unexpected JSON shape for {path}: {type(data)}")
+            return data
         except Exception as e:
-            return {"_meta": {"url": url, "path": path, "status": status, "ok": False},
-                    "_exception": f"{type(e).__name__}: {e}", "_body": resp_text[:2000]}
-        finally:
-            dt_ms = int((time.time() - t0) * 1000)
-            self.calls.append({"path": path, "url": url, "ms": dt_ms, "status": status,
-                               "ok": status is not None and 200 <= status < 300})
+            dt = int((time.time() - t0) * 1000)
+            if resp is None:
+                self.calls.append(ApiCall(operation=path, ok=False, status_code=None, duration_ms=dt, error=str(e)))
+            raise
+
     def get(self, domain: str, operation: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._post(f"{domain}/{operation}", payload)
 
@@ -1948,8 +1929,6 @@ def _extract_param(name: str) -> Optional[str]:
     return v.strip() if isinstance(v, str) else v
 
 
-@app.post("/audit")
-
 @app.post("/lookup")
 def lookup_ids():
     """Small helper endpoint for the frontend ID browser / JSON payload builder."""
@@ -2008,7 +1987,7 @@ def lookup_ids():
             items = []
             if ent_id:
                 items.append({"name": ent_name or "Enterprise", "id": ent_id})
-            return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": serialize_call_log(getattr(conn, "calls", []))})
+            return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": conn.calls})
 
         # Special: products (flatten Products from Services)
         if item == "products":
@@ -2024,7 +2003,7 @@ def lookup_ids():
                         continue
                     pname = p.get("Name") or "Product"
                     items.append({"name": f"{service_name} — {pname}", "id": pid})
-            return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": serialize_call_log(getattr(conn, "calls", []))})
+            return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": conn.calls})
 
         data = conn._post(endpoint, {})
         rows = data.get(list_key) or []
@@ -2034,7 +2013,7 @@ def lookup_ids():
             if not rid:
                 continue
             items.append({"name": r.get(name_key) or "", "id": rid})
-        return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": serialize_call_log(getattr(conn, "calls", []))})
+        return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": conn.calls})
 
     except Exception:
         app.logger.exception("LOOKUP ERROR")
@@ -2042,6 +2021,7 @@ def lookup_ids():
 
 
 
+@app.post("/audit")
 def audit():
     try:
         # Inputs (supports both JSON and multipart/form-data)
