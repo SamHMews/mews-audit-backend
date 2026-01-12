@@ -1960,18 +1960,18 @@ def lookup_ids():
 
         # Catalogue of supported lookups: (endpoint, response_list_key, name_field, id_field)
         catalog = {
-            "enterprise": ("Configuration/Get", None, None, None),
             "services": ("Services/GetAll", "Services", "Name", "Id"),
             "serviceids": ("Services/GetAll", "Services", "Name", "Id"),
-            "resources": ("Resources/GetAll", "Resources", "Name", "Id"),
-            "spaces": ("Spaces/GetAll", "Spaces", "Name", "Id"),
-            "resourcecategories": ("ResourceCategories/GetAll", "ResourceCategories", "Name", "Id"),
-            "roomcategories": ("ResourceCategories/GetAll", "ResourceCategories", "Name", "Id"),
             "rates": ("Rates/GetAll", "Rates", "Name", "Id"),
             "rateids": ("Rates/GetAll", "Rates", "Name", "Id"),
-            "rategroups": ("RateGroups/GetAll", "RateGroups", "Name", "Id"),
             "accountingcategories": ("AccountingCategories/GetAll", "AccountingCategories", "Name", "Id"),
-            "products": ("Services/GetAll", None, None, None),  # handled specially (Products live under Services)
+            # Room categories live behind ResourceCategories and require ServiceIds in the request
+            "resourcecategories": ("ResourceCategories/GetAll", "ResourceCategories", "Name", "Id"),
+            "roomcategories": ("ResourceCategories/GetAll", "ResourceCategories", "Name", "Id"),
+            # Age categories (require ServiceIds)
+            "agecategories": ("AgeCategories/GetAll", "AgeCategories", "Name", "Id"),
+            # Products live under Services (handled specially)
+            "products": ("Services/GetAll", None, None, None),
         }
 
         if item not in catalog:
@@ -2005,7 +2005,18 @@ def lookup_ids():
                     items.append({"name": f"{service_name} — {pname}", "id": pid})
             return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": conn.calls})
 
-        data = conn._post(endpoint, {})
+        # Some endpoints require ServiceIds
+        post_payload = {}
+        if endpoint in ("ResourceCategories/GetAll", "AgeCategories/GetAll"):
+            svc_data = conn._post("Services/GetAll", {})
+            svc_rows = svc_data.get("Services") or []
+            service_ids = [s.get("Id") for s in svc_rows if isinstance(s, dict) and s.get("Id")]
+            post_payload = {"ServiceIds": service_ids}
+
+        try:
+            data = conn._post(endpoint, post_payload)
+        except RuntimeError as e:
+            return jsonify({"ok": False, "environment": env, "api_base": base_url, "error": str(e)}), 200
         rows = data.get(list_key) or []
         items = []
         for r in rows:
@@ -2015,9 +2026,9 @@ def lookup_ids():
             items.append({"name": r.get(name_key) or "", "id": rid})
         return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": conn.calls})
 
-    except Exception:
+    except Exception as e:
         app.logger.exception("LOOKUP ERROR")
-        return jsonify({"ok": False, "error": "Lookup failed (see server logs)"}), 500
+        return jsonify({"ok": False, "error": str(e)}), 200
 
 
 
