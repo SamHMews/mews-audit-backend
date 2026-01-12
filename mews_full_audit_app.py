@@ -2024,7 +2024,7 @@ def lookup_ids():
                         continue
                     pname = p.get("Name") or "Product"
                     items.append({"name": f"{service_name} — {pname}", "id": pid})
-            return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": [c.as_dict() for c in conn.calls]})
+            return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": serialize_call_log(getattr(conn, "calls", []))})
 
         data = conn._post(endpoint, {})
         rows = data.get(list_key) or []
@@ -2034,7 +2034,7 @@ def lookup_ids():
             if not rid:
                 continue
             items.append({"name": r.get(name_key) or "", "id": rid})
-        return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": [c.as_dict() for c in conn.calls]})
+        return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": serialize_call_log(getattr(conn, "calls", []))})
 
     except Exception:
         app.logger.exception("LOOKUP ERROR")
