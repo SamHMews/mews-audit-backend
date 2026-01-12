@@ -1952,20 +1952,11 @@ def lookup_ids():
             return jsonify({"ok": False, "error": "missing_item"}), 400
 
         # Backwards-compatible: some earlier versions used resolve_env_tokens() only.
-        try:
-            cfg = resolve_env_config(env)  # type: ignore[name-defined]
-        except Exception:
-            cfg = resolve_env_tokens(env)  # type: ignore[name-defined]
+                # Resolve API base + client token for selected environment
+        base_url, client_token = resolve_env_tokens(env)
+        conn = MewsConnector(base_url=base_url, client_token=client_token, access_token=at)
 
-        base_url = cfg.get("api_base") or cfg.get("base_url") or cfg.get("apiBase") or cfg.get("api_base_url")
-
-        # Create connector; constructor signatures have varied between versions.
-        try:
-            conn = MewsConnector(access_token=at, environment=env)  # type: ignore[call-arg]
-        except TypeError:
-            conn = MewsConnector(access_token=at, base_url=base_url)  # type: ignore[call-arg]
-
-        supported = {
+supported = {
             "services",
             "serviceids",
             "rates",
