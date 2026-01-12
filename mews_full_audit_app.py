@@ -51,7 +51,7 @@ DEFAULT_API_BASE = os.getenv("MEWS_API_BASE_URL", "https://api.mews-demo.com/api
 #   MEWS_API_BASE_DEMO, MEWS_API_BASE_PRODUCT
 #
 MEWS_CLIENT_TOKEN_DEMO = (os.getenv("DEMO") or os.getenv("MEWS_CLIENT_TOKEN_DEMO") or "").strip()
-MEWS_CLIENT_TOKEN_PRODUCT = (os.getenv("PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCT") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCTION") or "").strip()
+MEWS_CLIENT_TOKEN_PRODUCT = (os.getenv("PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCT") or "").strip()
 
 MEWS_API_BASE_DEMO = os.getenv("MEWS_API_BASE_DEMO", DEFAULT_API_BASE).rstrip("/")
 MEWS_API_BASE_PRODUCT = os.getenv("MEWS_API_BASE_PRODUCT", "https://api.mews.com/api/connector/v1").rstrip("/")
@@ -61,8 +61,9 @@ DEFAULT_TIMEOUT = int(os.getenv("MEWS_HTTP_TIMEOUT_SECONDS", "30"))
 MAX_PDF_MB = int(os.getenv("MAX_PDF_MB", "18"))
 
 ENV_CONFIG = {
-
     "demo": {"base_url": MEWS_API_BASE_DEMO, "client_token": MEWS_CLIENT_TOKEN_DEMO},
+    "production": {"base_url": MEWS_API_BASE_PRODUCT, "client_token": MEWS_CLIENT_TOKEN_PRODUCT},
+    # Backwards compatible alias (older frontend used "product")
     "product": {"base_url": MEWS_API_BASE_PRODUCT, "client_token": MEWS_CLIENT_TOKEN_PRODUCT},
 }
 
@@ -1929,6 +1930,99 @@ def _extract_param(name: str) -> Optional[str]:
 
 
 @app.post("/audit")
+
+@app.post("/lookup")
+def lookup_ids():
+    """Small helper endpoint for the frontend ID browser / JSON payload builder."""
+    try:
+        at = _extract_param("access_token")
+        env = (_extract_param("environment") or _extract_param("env") or "demo").strip().lower()
+        item = (_extract_param("item") or "").strip().lower()
+
+        # Resolve env to base_url + client_token from ENV_CONFIG unless explicitly posted
+        ct = _extract_param("client_token")
+        base_url = _extract_param("base_url")
+
+        env_cfg = ENV_CONFIG.get(env)
+        if env_cfg:
+            if not base_url:
+                base_url = env_cfg.get("base_url") or DEFAULT_API_BASE
+            if not ct:
+                ct = env_cfg.get("client_token") or ""
+        else:
+            if not base_url:
+                base_url = DEFAULT_API_BASE
+
+        if not at:
+            return jsonify({"ok": False, "error": "Missing access_token"}), 400
+        if not ct:
+            return jsonify({"ok": False, "error": f"No client token configured for environment '{env}'. Set Render env var DEMO or PRODUCTION."}), 400
+
+        conn = MewsConnector(base_url=base_url, client_token=ct, access_token=at)
+
+        # Catalogue of supported lookups: (endpoint, response_list_key, name_field, id_field)
+        catalog = {
+            "enterprise": ("Configuration/Get", None, None, None),
+            "services": ("Services/GetAll", "Services", "Name", "Id"),
+            "serviceids": ("Services/GetAll", "Services", "Name", "Id"),
+            "resources": ("Resources/GetAll", "Resources", "Name", "Id"),
+            "spaces": ("Spaces/GetAll", "Spaces", "Name", "Id"),
+            "resourcecategories": ("ResourceCategories/GetAll", "ResourceCategories", "Name", "Id"),
+            "roomcategories": ("ResourceCategories/GetAll", "ResourceCategories", "Name", "Id"),
+            "rates": ("Rates/GetAll", "Rates", "Name", "Id"),
+            "rateids": ("Rates/GetAll", "Rates", "Name", "Id"),
+            "rategroups": ("RateGroups/GetAll", "RateGroups", "Name", "Id"),
+            "accountingcategories": ("AccountingCategories/GetAll", "AccountingCategories", "Name", "Id"),
+            "products": ("Services/GetAll", None, None, None),  # handled specially (Products live under Services)
+        }
+
+        if item not in catalog:
+            return jsonify({"ok": False, "error": f"Unsupported item '{item}'. Supported: {sorted(set(catalog.keys()))}"}), 400
+
+        endpoint, list_key, name_key, id_key = catalog[item]
+
+        # Special: enterprise config
+        if item == "enterprise":
+            data = conn._post(endpoint, {})
+            ent_id = data.get("EnterpriseId") or data.get("Enterprise", {}).get("Id")
+            ent_name = data.get("Enterprise", {}).get("Name") if isinstance(data.get("Enterprise"), dict) else None
+            items = []
+            if ent_id:
+                items.append({"name": ent_name or "Enterprise", "id": ent_id})
+            return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": [c.as_dict() for c in conn.calls]})
+
+        # Special: products (flatten Products from Services)
+        if item == "products":
+            data = conn._post("Services/GetAll", {})
+            services = data.get("Services") or []
+            items = []
+            for s in services:
+                prods = s.get("Products") or []
+                service_name = s.get("Name") or "Service"
+                for p in prods:
+                    pid = p.get("Id")
+                    if not pid:
+                        continue
+                    pname = p.get("Name") or "Product"
+                    items.append({"name": f"{service_name} — {pname}", "id": pid})
+            return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": [c.as_dict() for c in conn.calls]})
+
+        data = conn._post(endpoint, {})
+        rows = data.get(list_key) or []
+        items = []
+        for r in rows:
+            rid = r.get(id_key)
+            if not rid:
+                continue
+            items.append({"name": r.get(name_key) or "", "id": rid})
+        return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": [c.as_dict() for c in conn.calls]})
+
+    except Exception:
+        app.logger.exception("LOOKUP ERROR")
+        return jsonify({"ok": False, "error": "Lookup failed (see server logs)"}), 500
+
+
+
 def audit():
     try:
         # Inputs (supports both JSON and multipart/form-data)
