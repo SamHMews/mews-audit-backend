@@ -1958,6 +1958,37 @@ def lookup_ids():
 
         conn = MewsConnector(base_url=base_url, client_token=ct, access_token=at)
 
+        def _name_from(v):
+            if v is None:
+                return None
+            if isinstance(v, str):
+                s = v.strip()
+                return s or None
+            if isinstance(v, dict):
+                for k in ("Value", "value", "Text", "text", "Name", "name"):
+                    if k in v and v.get(k):
+                        return str(v.get(k)).strip() or None
+                return None
+            if isinstance(v, list):
+                for it in v:
+                    n = _name_from(it)
+                    if n:
+                        return n
+                return None
+            try:
+                return str(v).strip() or None
+            except Exception:
+                return None
+
+        def _extract_name(obj):
+            if isinstance(obj, dict):
+                for k in ("Name", "Names", "DisplayName", "Title", "Description"):
+                    if k in obj and obj.get(k):
+                        n = _name_from(obj.get(k))
+                        if n:
+                            return n
+            return None
+
         # Catalogue of supported lookups: (endpoint, response_list_key, name_field, id_field)
         catalog = {
             "services": ("Services/GetAll", "Services", "Name", "Id"),
@@ -1991,39 +2022,68 @@ def lookup_ids():
 
         # Special: products (flatten Products from Services)
         if item == "products":
-            data = conn._post("Services/GetAll", {})
-            services = data.get("Services") or []
+            # Products can be retrieved in different ways depending on environment/config.
+            # Preferred: Products/GetAll (may accept empty payload or require ServiceIds).
+            prows = []
+            try:
+                pdata = conn._post("Products/GetAll", {})
+                prows = pdata.get("Products") or pdata.get("Product") or []
+            except Exception:
+                prows = []
+
+            if not prows:
+                # Fallback: try Products/GetAll with ServiceIds if required
+                if svc_ids:
+                    try:
+                        pdata = conn._post("Products/GetAll", {"ServiceIds": svc_ids})
+                        prows = pdata.get("Products") or pdata.get("Product") or []
+                    except Exception:
+                        prows = []
+
+            if not prows:
+                # Final fallback: some payloads return products nested under services
+                if not services:
+                    data = conn._post("Services/GetAll", {})
+                    services = data.get("Services") or []
+                for s in services:
+                    for p in (s.get("Products") or []):
+                        prows.append({
+                            "Id": p.get("Id"),
+                            "Name": p.get("Name"),
+                            "ServiceId": s.get("Id"),
+                            "ServiceName": s.get("Name"),
+                        })
+
             items = []
-            for s in services:
-                prods = s.get("Products") or []
-                service_name = s.get("Name") or "Service"
-                for p in prods:
-                    pid = p.get("Id")
-                    if not pid:
-                        continue
-                    pname = p.get("Name") or "Product"
-                    items.append({"name": f"{service_name} — {pname}", "id": pid})
-            return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": conn.calls})
+            for p in prows:
+                pid = p.get("Id")
+                if not pid:
+                    continue
+                pname = _extract_name(p) or _name_from(p.get("Name")) or ""
+                # keep the service context when available
+                if p.get("ServiceName") or p.get("ServiceId"):
+                    sname = _name_from(p.get("ServiceName")) or ""
+                    if not sname and services:
+                        # try to resolve by ServiceId
+                        sid = p.get("ServiceId")
+                        if sid:
+                            for s in services:
+                                if s.get("Id") == sid:
+                                    sname = _extract_name(s) or _name_from(s.get("Name")) or ""
+                                    break
+                    display = f"{sname} — {pname}".strip(" —")
+                    items.append({"name": display, "id": pid})
+                else:
+                    items.append({"name": pname, "id": pid})
+            return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items})
 
-        # Some endpoints require ServiceIds
-        post_payload = {}
-        if endpoint in ("ResourceCategories/GetAll", "AgeCategories/GetAll"):
-            svc_data = conn._post("Services/GetAll", {})
-            svc_rows = svc_data.get("Services") or []
-            service_ids = [s.get("Id") for s in svc_rows if isinstance(s, dict) and s.get("Id")]
-            post_payload = {"ServiceIds": service_ids}
-
-        try:
-            data = conn._post(endpoint, post_payload)
-        except RuntimeError as e:
-            return jsonify({"ok": False, "environment": env, "api_base": base_url, "error": str(e)}), 200
-        rows = data.get(list_key) or []
         items = []
         for r in rows:
             rid = r.get(id_key)
             if not rid:
                 continue
-            items.append({"name": r.get(name_key) or "", "id": rid})
+            nm = _extract_name(r) or _name_from(r.get(name_key)) or ""
+            items.append({"name": nm, "id": rid})
         return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": conn.calls})
 
     except Exception as e:
