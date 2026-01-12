@@ -5,6 +5,23 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+def serialize_call_log(calls):
+    """Return a JSON-safe list for the API call log."""
+    out = []
+    for c in calls or []:
+        if isinstance(c, dict):
+            out.append(c)
+        elif hasattr(c, "as_dict"):
+            try:
+                out.append(c.as_dict())
+            except Exception:
+                out.append({"event": str(c)})
+        else:
+            out.append({"event": str(c)})
+    return out
+
+
+
 import requests
 from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
@@ -1991,7 +2008,7 @@ def lookup_ids():
             items = []
             if ent_id:
                 items.append({"name": ent_name or "Enterprise", "id": ent_id})
-            return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": [c.as_dict() for c in conn.calls]})
+            return jsonify({"ok": True, "environment": env, "api_base": base_url, "items": items, "calls": serialize_call_log(getattr(conn, "calls", []))})
 
         # Special: products (flatten Products from Services)
         if item == "products":
