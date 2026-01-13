@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import time
 import traceback
@@ -2074,6 +2075,32 @@ def lookup_ids():
         # Sort by name for nicer UX
         items.sort(key=lambda x: str(x.get("name") or "").lower())
 
+        calls = []
+        for c in (getattr(conn, "calls", None) or []):
+            if isinstance(c, dict):
+                calls.append(c)
+                continue
+            if hasattr(c, "as_dict"):
+                try:
+                    calls.append(c.as_dict())
+                    continue
+                except Exception:
+                    pass
+            d = {}
+            for k in ("method","path","endpoint","url","status","status_code","ms","duration_ms","label"):
+                v = getattr(c, k, None)
+                if v is not None:
+                    d[k] = v
+            if not d:
+                d = {"repr": repr(c)}
+            safe_d = {}
+            for k, v in d.items():
+                try:
+                    json.dumps(v)
+                    safe_d[k] = v
+                except TypeError:
+                    safe_d[k] = str(v)
+            calls.append(safe_d)
         return jsonify({
             "ok": True,
             "environment": env,
@@ -2081,7 +2108,7 @@ def lookup_ids():
             "item": item,
             "endpoint": endpoint,
             "items": items,
-            "calls": [c.as_dict() for c in (conn.calls or [])],
+            "calls": calls,
         }), 200
 
     except Exception as e:
