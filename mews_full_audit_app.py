@@ -1933,6 +1933,25 @@ def _extract_param(name: str) -> Optional[str]:
 
 @app.post("/lookup")
 def lookup_ids():
+
+    def _pick_name(obj: dict, fallback_id: str = "") -> str:
+        """Best-effort name extractor for Connector API objects."""
+        if not isinstance(obj, dict):
+            return fallback_id or ""
+        for k in ("Name", "name", "DisplayName", "displayName", "Identifier", "identifier"):
+            v = obj.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        names = obj.get("Names") or obj.get("names")
+        if isinstance(names, dict) and names:
+            for lang in ("en-GB", "en_GB", "en", "en-US", "en_US"):
+                v = names.get(lang)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            for v in names.values():
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        return fallback_id or ""
     """
     Lightweight ID helper used by the frontend.
     Expects JSON:
@@ -1944,6 +1963,20 @@ def lookup_ids():
     """
     try:
         payload = request.get_json(force=True, silent=True) or {}
+        for k in ("Name", "name", "DisplayName", "displayName", "Identifier", "identifier"):
+            v = obj.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        names = obj.get("Names") or obj.get("names")
+        if isinstance(names, dict) and names:
+            for lang in ("en-GB", "en_GB", "en", "en-US", "en_US"):
+                v = names.get(lang)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            for v in names.values():
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        return fallback_id or ""
         env = str(payload.get("environment") or "demo").strip().lower()
         item = str(payload.get("item") or "").strip().lower()
         at = str(payload.get("access_token") or "").strip()
@@ -2016,15 +2049,30 @@ def lookup_ids():
         body = {}
 
         if endpoint == "ResourceCategories/GetAll":
-            room_svc_ids = _pick_room_service_ids()
-            body = {"ServiceIds": room_svc_ids} if room_svc_ids else {}
+            # Connector API expects ServiceIds and Limitation; prefer room-related services, otherwise all services.
+            svc_ids = _pick_room_service_ids()
+            if not svc_ids:
+                try:
+                    _svc_data = conn._post("Services/GetAll", {})
+                    svc_ids = [s.get("Id") for s in _svc_data.get("Services", []) if s.get("Id")]
+                except Exception:
+                    svc_ids = []
+            body = {"ServiceIds": svc_ids, "Limitation": {"Count": 1000}} if svc_ids else {"Limitation": {"Count": 1000}}
+
         elif endpoint == "Products/GetAll":
-            # Try empty payload first; if API demands ServiceIds, retry with all service ids.
-            body = {}
+            # Connector API expects ServiceIds and Limitation.
+            try:
+                _svc_data = conn._post("Services/GetAll", {})
+                svc_ids = [s.get("Id") for s in _svc_data.get("Services", []) if s.get("Id")]
+            except Exception:
+                svc_ids = []
+            body = {"ServiceIds": svc_ids, "Limitation": {"Count": 1000}} if svc_ids else {"Limitation": {"Count": 1000}}
+
         else:
             body = {}
 
         # Execute
+
         data = conn._post(endpoint, body) or {}
 
         # Products fallback if empty + API wants ServiceIds
@@ -2061,14 +2109,7 @@ def lookup_ids():
             if not isinstance(r, dict):
                 continue
             rid = r.get("Id") or r.get("id")
-            name = (
-                r.get("Name")
-                or r.get("name")
-                or r.get("DisplayName")
-                or r.get("displayName")
-                or r.get("Label")
-                or r.get("label")
-            )
+            name = _pick_name(r, str(rid) if rid is not None else "")
             if rid:
                 items.append({"id": rid, "name": name or str(rid)})
 
