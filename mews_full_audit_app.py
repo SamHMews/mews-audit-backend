@@ -1,8 +1,7 @@
 import os
-import json
-import logging
 import time
 import traceback
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -1933,228 +1932,195 @@ def _extract_param(name: str) -> Optional[str]:
 
 @app.post("/lookup")
 def lookup_ids():
-
-    def _pick_name(obj: dict, fallback_id: str = "") -> str:
-        """Best-effort name extractor for Connector API objects."""
-        if not isinstance(obj, dict):
-            return fallback_id or ""
-        for k in ("Name", "name", "DisplayName", "displayName", "Identifier", "identifier"):
-            v = obj.get(k)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-        names = obj.get("Names") or obj.get("names")
-        if isinstance(names, dict) and names:
-            for lang in ("en-GB", "en_GB", "en", "en-US", "en_US"):
-                v = names.get(lang)
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-            for v in names.values():
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-        return fallback_id or ""
     """
-    Lightweight ID helper used by the frontend.
+    ID helper endpoint for the frontend.
+
     Expects JSON:
-      - environment: "demo" | "production"
-      - access_token: Connector API access token
-      - item: one of: serviceids, roomcategories, rateids, products, accountingcategories, agecategories
+      {
+        "environment": "demo" | "production",
+        "access_token": "<Connector API access token>",
+        "item": "serviceids" | "services" | "roomcategories" | "resourcecategories" | "agecategories" | "products" | "rates" | "rategroups" | "accountingcategories"
+      }
+
     Returns:
-      { ok: bool, items: [{id,name}], error/details? , calls: [...] }
+      { "ok": true, "items": [ {"id": "...", "name": "..."} ], ... }
     """
     try:
-        payload = request.get_json(force=True, silent=True) or {}
-        for k in ("Name", "name", "DisplayName", "displayName", "Identifier", "identifier"):
-            v = obj.get(k)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-        names = obj.get("Names") or obj.get("names")
-        if isinstance(names, dict) and names:
-            for lang in ("en-GB", "en_GB", "en", "en-US", "en_US"):
-                v = names.get(lang)
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-            for v in names.values():
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-        return fallback_id or ""
-        env = str(payload.get("environment") or "demo").strip().lower()
-        item = str(payload.get("item") or "").strip().lower()
-        at = str(payload.get("access_token") or "").strip()
+        payload = request.get_json(silent=True) or {}
+        env = (payload.get("environment") or "demo").strip().lower()
+        item = (payload.get("item") or "").strip().lower()
+        access_token = (payload.get("access_token") or payload.get("accessToken") or "").strip()
 
-        if not at:
-            return jsonify({"ok": False, "error": "missing_access_token"}), 200
+        if not access_token:
+            return jsonify({"ok": False, "error": "missing_access_token", "details": "Missing access_token"}), 400
 
-        # Resolve base URL + client token from environment
-        base_url, client_token = resolve_env_tokens(env)
+        # Defensive: sometimes the UI ends up sending garbage (e.g. copied code) into the token field.
+        if any(x in access_token.lower() for x in ["import ", "def ", "class ", "\n", "\r"]):
+            return jsonify({"ok": False, "error": "invalid_access_token", "details": "access_token does not look like a token"}), 400
 
-        # Create connector (constructor requires base_url + client_token)
-        conn = MewsConnector(base_url, client_token, at, client_name=DEFAULT_CLIENT_NAME)
+        # Resolve base URL + client token from Render env vars.
+        # User confirmed:
+        #   DEMO for demo client token
+        #   PRODUCTION for production client token
+        #   demo base url = https://api.mews-demo.com
+        #   production base url = https://api.mews.com
+        if env in ("prod", "production", "live"):
+            base_url = "https://api.mews.com/api/connector/v1"
+            client_token = os.getenv("PRODUCTION") or os.getenv("MEWS_CLIENT_TOKEN_PRODUCTION") or ""
+            env_name = "production"
+        else:
+            base_url = "https://api.mews-demo.com/api/connector/v1"
+            client_token = os.getenv("DEMO") or os.getenv("MEWS_CLIENT_TOKEN_DEMO") or ""
+            env_name = "demo"
 
-        # Supported items -> endpoint
-        # (We intentionally keep this tight to avoid accidental 400s.)
-        catalog = {
-            "serviceids": "Services/GetAll",
-            "services": "Services/GetAll",
-            "rateids": "Rates/GetAll",
-            "rates": "Rates/GetAll",
-            "accountingcategories": "AccountingCategories/GetAll",
-            "accountingcategoryids": "AccountingCategories/GetAll",
-            "roomcategories": "ResourceCategories/GetAll",
-            "roomcategoryids": "ResourceCategories/GetAll",
-            "products": "Products/GetAll",
-            "productids": "Products/GetAll",
-            "agecategories": "AgeCategories/GetAll",
-            "agecategoryids": "AgeCategories/GetAll",
-        }
+        if not client_token:
+            return jsonify({
+                "ok": False,
+                "error": "missing_client_token",
+                "details": f"Missing client token environment variable for {env_name}. Expected {'PRODUCTION' if env_name=='production' else 'DEMO'}."
+            }), 500
 
-        endpoint = catalog.get(item)
-        if not endpoint:
-            return jsonify({"ok": False, "error": "unsupported_item", "supported": sorted(set(catalog.keys()))}), 200
+        conn = MewsConnector(base_url=base_url, client_token=client_token, access_token=access_token)
 
-        # Fetch services once when needed
-        services = None
-        service_ids_all = None
+        def _pick_name(obj: dict) -> str:
+            """Extract a reasonable name from Mews Connector API objects."""
+            if not isinstance(obj, dict):
+                return ""
+            # most common
+            if isinstance(obj.get("Name"), str) and obj.get("Name"):
+                return obj["Name"]
+            # i18n maps (Names / LocalizedNames etc.)
+            names = obj.get("Names") or obj.get("LocalizedNames") or obj.get("LocalisedNames")
+            if isinstance(names, dict) and names:
+                for k in ("en-GB", "en-US", "en", "cs-CZ"):
+                    v = names.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+                # first value
+                for v in names.values():
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+            return ""
 
-        def _get_services():
-            nonlocal services, service_ids_all
-            if services is None:
-                data = conn._post("Services/GetAll", {}) or {}
-                services = (data.get("Services") or data.get("services") or [])
-                service_ids_all = [s.get("Id") or s.get("id") for s in services if isinstance(s, dict)]
-                service_ids_all = [sid for sid in service_ids_all if sid]
-            return services
-
-        def _pick_room_service_ids():
-            svcs = _get_services()
-            ids = []
-            for s in svcs:
-                if not isinstance(s, dict):
+        def _as_items(rows):
+            out = []
+            if not isinstance(rows, list):
+                return out
+            for r in rows:
+                if not isinstance(r, dict):
                     continue
-                name = str(s.get("Name") or s.get("name") or "")
-                stype = str(s.get("Type") or s.get("type") or "")
-                if "room" in name.lower() or "accom" in name.lower() or "room" in stype.lower() or "accom" in stype.lower():
-                    sid = s.get("Id") or s.get("id")
-                    if sid:
-                        ids.append(sid)
-            # Fallback: if nothing matched, try the first service (better than hard-failing)
-            if not ids:
-                svcs = _get_services()
-                if svcs and isinstance(svcs[0], dict):
-                    sid = svcs[0].get("Id") or svcs[0].get("id")
-                    if sid:
-                        ids = [sid]
-            return ids
+                rid = r.get("Id") or r.get("id")
+                if not rid:
+                    continue
+                name = _pick_name(r) or rid
+                out.append({"id": rid, "name": name})
+            return out
 
-        # Build request body (some endpoints require ServiceIds)
-        body = {}
+        endpoint = None
+        items = []
 
-        if endpoint == "ResourceCategories/GetAll":
-            # Connector API expects ServiceIds and Limitation; prefer room-related services, otherwise all services.
-            svc_ids = _pick_room_service_ids()
-            if not svc_ids:
-                try:
-                    _svc_data = conn._post("Services/GetAll", {})
-                    svc_ids = [s.get("Id") for s in _svc_data.get("Services", []) if s.get("Id")]
-                except Exception:
-                    svc_ids = []
-            body = {"ServiceIds": svc_ids, "Limitation": {"Count": 1000}} if svc_ids else {"Limitation": {"Count": 1000}}
+        # Services
+        if item in ("services", "serviceids", "service_ids", "service"):
+            endpoint = "Services/GetAll"
+            data = conn._post(endpoint, {})
+            rows = data.get("Services") or data.get("Items") or data.get("Data") or []
+            items = _as_items(rows)
 
-        elif endpoint == "Products/GetAll":
-            # Connector API expects ServiceIds and Limitation.
+        # Rates
+        elif item in ("rates", "rateids", "rate_ids", "rate"):
+            endpoint = "Rates/GetAll"
+            data = conn._post(endpoint, {})
+            rows = data.get("Rates") or data.get("Items") or []
+            items = _as_items(rows)
+
+        # Rate groups (optional; some environments require Limitation etc. so we keep it safe)
+        elif item in ("rategroups", "rate_groups", "rategroupids", "rategroup_ids", "rategroup"):
+            endpoint = "RateGroups/GetAll"
+            # some tenants reject empty payloads; keep minimal + safe
             try:
-                _svc_data = conn._post("Services/GetAll", {})
-                svc_ids = [s.get("Id") for s in _svc_data.get("Services", []) if s.get("Id")]
+                data = conn._post(endpoint, {"Limitation": {"Count": 500, "Offset": 0}})
             except Exception:
-                svc_ids = []
-            body = {"ServiceIds": svc_ids, "Limitation": {"Count": 1000}} if svc_ids else {"Limitation": {"Count": 1000}}
+                data = conn._post(endpoint, {})
+            rows = data.get("RateGroups") or data.get("Items") or []
+            items = _as_items(rows)
+
+        # Accounting categories
+        elif item in ("accountingcategories", "accountingcategoryids", "accounting_category_ids", "accountingcategory"):
+            endpoint = "AccountingCategories/GetAll"
+            data = conn._post(endpoint, {})
+            rows = data.get("AccountingCategories") or data.get("Items") or []
+            items = _as_items(rows)
+
+        # Room/resource categories
+        elif item in ("roomcategories", "roomcategoryids", "resourcecategories", "resourcecategoryids"):
+            # ResourceCategories/GetAll requires ServiceIds
+            endpoint = "ResourceCategories/GetAll"
+            svc_data = conn._post("Services/GetAll", {})
+            svc_rows = svc_data.get("Services") or []
+            svc_ids = [s.get("Id") for s in svc_rows if isinstance(s, dict) and s.get("Id")]
+            if not svc_ids:
+                return jsonify({"ok": True, "environment": env_name, "api_base": base_url, "endpoint": endpoint, "item": item, "items": [], "note": "No services found to derive ServiceIds."})
+
+            try:
+                data = conn._post(endpoint, {"ServiceIds": svc_ids})
+            except Exception:
+                # fallback: some tenants accept empty payloads (rare)
+                data = conn._post(endpoint, {})
+            rows = data.get("ResourceCategories") or data.get("RoomCategories") or data.get("Items") or []
+            items = _as_items(rows)
+
+        # Age categories
+        elif item in ("agecategories", "agecategoryids", "age_category_ids", "agecategory"):
+            endpoint = "AgeCategories/GetAll"
+            data = conn._post(endpoint, {})
+            rows = data.get("AgeCategories") or data.get("Items") or []
+            items = _as_items(rows)
+
+        # Products
+        elif item in ("products", "productids", "product_ids", "product"):
+            endpoint = "Products/GetAll"
+            # Some tenants require ServiceIds; use them if we can.
+            svc_data = conn._post("Services/GetAll", {})
+            svc_rows = svc_data.get("Services") or []
+            svc_ids = [s.get("Id") for s in svc_rows if isinstance(s, dict) and s.get("Id")]
+            payload_prod = {"ServiceIds": svc_ids} if svc_ids else {}
+            try:
+                data = conn._post(endpoint, payload_prod)
+            except Exception:
+                # fallback to empty payload
+                data = conn._post(endpoint, {})
+            rows = data.get("Products") or data.get("Items") or []
+            items = _as_items(rows)
 
         else:
-            body = {}
+            supported = [
+                "services", "rates", "rategroups", "accountingcategories",
+                "roomcategories", "resourcecategories", "agecategories", "products"
+            ]
+            return jsonify({"ok": False, "error": "unsupported_item", "details": f"Unsupported item '{item}'. Supported: {supported}"}), 400
 
-        # Execute
-
-        data = conn._post(endpoint, body) or {}
-
-        # Products fallback if empty + API wants ServiceIds
-        if endpoint == "Products/GetAll":
-            products = data.get("Products") or data.get("products") or []
-            if not products:
-                # if response contains Message suggesting ServiceIds are required, retry
-                msg = str(data.get("Message") or data.get("message") or "")
-                if "service" in msg.lower() and "id" in msg.lower():
-                    _get_services()
-                    if service_ids_all:
-                        data = conn._post(endpoint, {"ServiceIds": service_ids_all}) or {}
-                        products = data.get("Products") or data.get("products") or []
-
-        # Normalise rows -> list[dict]
-        rows = None
-        if endpoint == "Services/GetAll":
-            rows = data.get("Services") or data.get("services") or []
-        elif endpoint == "Rates/GetAll":
-            rows = data.get("Rates") or data.get("rates") or []
-        elif endpoint == "AccountingCategories/GetAll":
-            rows = data.get("AccountingCategories") or data.get("accountingCategories") or data.get("categories") or []
-        elif endpoint == "ResourceCategories/GetAll":
-            rows = data.get("ResourceCategories") or data.get("resourceCategories") or data.get("categories") or []
-        elif endpoint == "Products/GetAll":
-            rows = data.get("Products") or data.get("products") or []
-        elif endpoint == "AgeCategories/GetAll":
-            rows = data.get("AgeCategories") or data.get("ageCategories") or data.get("categories") or []
-
-        rows = rows or []
-
-        items = []
-        for r in rows:
-            if not isinstance(r, dict):
-                continue
-            rid = r.get("Id") or r.get("id")
-            name = _pick_name(r, str(rid) if rid is not None else "")
-            if rid:
-                items.append({"id": rid, "name": name or str(rid)})
-
-        # Sort by name for nicer UX
-        items.sort(key=lambda x: str(x.get("name") or "").lower())
-
-        calls = []
+        # Serialise call log safely (ApiCall has no as_dict in v29b)
+        calls_out = []
         for c in (getattr(conn, "calls", None) or []):
-            if isinstance(c, dict):
-                calls.append(c)
-                continue
-            if hasattr(c, "as_dict"):
-                try:
-                    calls.append(c.as_dict())
-                    continue
-                except Exception:
-                    pass
-            d = {}
-            for k in ("method","path","endpoint","url","status","status_code","ms","duration_ms","label"):
-                v = getattr(c, k, None)
-                if v is not None:
-                    d[k] = v
-            if not d:
-                d = {"repr": repr(c)}
-            safe_d = {}
-            for k, v in d.items():
-                try:
-                    json.dumps(v)
-                    safe_d[k] = v
-                except TypeError:
-                    safe_d[k] = str(v)
-            calls.append(safe_d)
+            calls_out.append({
+                "endpoint": getattr(c, "endpoint", None),
+                "status_code": getattr(c, "status_code", None),
+                "duration_ms": getattr(c, "duration_ms", None),
+            })
+
         return jsonify({
             "ok": True,
-            "environment": env,
+            "environment": env_name,
             "api_base": base_url,
             "item": item,
             "endpoint": endpoint,
             "items": items,
-            "calls": calls,
-        }), 200
-
+            "calls": calls_out,
+        })
     except Exception as e:
         logging.exception("LOOKUP ERROR")
         return jsonify({"ok": False, "error": "lookup_failed", "details": str(e)}), 200
+
 
 @app.post("/audit")
 def audit():
