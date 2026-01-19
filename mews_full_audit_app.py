@@ -2238,9 +2238,7 @@ def audit():
         print(err)
         return jsonify({"ok": False, "error": str(e), "trace": err}), 500
 
-@app.get("/health")
-def health():
-    return jsonify({"ok": True, "ts": utc_now().isoformat(), "base": DEFAULT_API_BASE})
+
 
 
 if __name__ == "__main__":
