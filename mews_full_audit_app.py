@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-from flask import Flask, request, jsonify, send_file, render_template_string
+from flask import Flask, request, jsonify, send_file, render_template_string, send_from_directory
 from flask_cors import CORS
 
 from reportlab.lib import colors
@@ -1903,10 +1903,15 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "mews-audit-secret")
 CORS(app, resources={r"/*": {"origins": "*"}})
 
+@app.route("/", methods=["GET"])
+def serve_frontend():
+    return send_from_directory("static", "index.html")
 
-@app.get("/")
-def home():
-    return render_template_string(HTML)
+
+@app.route("/health", methods=["GET"])
+def health():
+    return {"status": "healthy"}, 200
+
 
 
 def parse_bool(v: Any, default: bool = False) -> bool:
