@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mews Audit</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='11' cy='11' r='7' stroke='%231C1D24' stroke-width='2' fill='none'/%3E%3Cline x1='16.65' y1='16.65' x2='21' y2='21' stroke='%231C1D24' stroke-width='2'/%3E%3C/svg%3E">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <style>
+    :root{
+      --text:#1C1D24;
+      --bg:#FFFFFF;
+      --cta:#F7BCF1;
+      --border:#D7D9E3;
+      --border-strong:#B7BBCB;
+      --radius:12px;
+      --shadow: 0 12px 32px rgba(28,29,36,.10);
+      --shadow-sm: 0 6px 18px rgba(28,29,36,.08);
+      --focus: 0 0 0 4px rgba(247,188,241,.55);
+      --max: 920px;
+    }
+
+    *{ box-sizing:border-box; }
+    body{
+      margin:0;
+      background:var(--bg);
+      color:var(--text);
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .container{
+      max-width:var(--max);
+      margin:0 auto;
+      padding:48px 24px;
+    }
+
+    header{
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      margin-bottom:36px;
+    }
+
+    .logo{
+      width:220px;
+      max-width:60vw;
+      height:auto;
+      display:block;
+    }
+
+    h1{
+      font-family:Manrope, Inter, sans-serif;
+      font-size:clamp(24px,3.2vw,34px);
+      font-weight:600;
+      margin:0 0 12px 0;
+      text-align:center;
+    }
+
+    .subtitle{
+      max-width:70ch;
+      font-size:14px;
+      opacity:.78;
+      line-height:1.55;
+      text-align:center;
+      margin:0 auto 22px auto;
+    }
+
+    .card{
+      border:1px solid var(--border);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+      padding:32px;
+      background:#fff;
+      max-width:720px;
+      margin:0 auto;
+    }
+
+    .row{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:16px;
+    }
+
+    @media(max-width:720px){
+      .row{ grid-template-columns:1fr; }
+      .logo{ width:200px; }
+    }
+
+    label{
+      font-size:13px;
+      font-weight:600;
+      margin-bottom:6px;
+      display:block;
+    }
+
+    input, select{
+      width:100%;
+      padding:12px;
+      border-radius:10px;
+      border:1px solid var(--border);
+      font-size:14px;
+      background:#fff;
+    }
+
+    input:focus, select:focus{
+      outline:none;
+      border-color:var(--border-strong);
+      box-shadow:var(--focus);
+    }
+
+    .hint{
+      font-size:12.5px;
+      opacity:.7;
+      margin-top:6px;
+    }
+
+    .msg{
+      display:none;
+      margin:0 auto 18px auto;
+      max-width:720px;
+      padding:12px 14px;
+      border-radius:12px;
+      font-size:13.5px;
+    }
+
+    .msg.ok{
+      background:rgba(16,185,129,.08);
+      border:1px solid rgba(16,185,129,.35);
+    }
+
+    .msg.err{
+      background:rgba(239,68,68,.08);
+      border:1px solid rgba(239,68,68,.35);
+    }
+
+    .toggleRow{
+      display:flex;
+      align-items:center;
+      gap:14px;
+      margin-top:18px;
+    }
+
+    .toggleText{
+      font-size:13px;
+      font-weight:600;
+      margin:0;
+    }
+
+    /* Pink Toggle (exact implementation provided) */
+    .toggle-container {
+      position: relative;
+      width: 52px;
+      height: 30px;
+      border-radius: 50px;
+      flex: 0 0 auto;
+    }
+
+    .toggle-checkbox {
+      appearance: none;
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      opacity: 0;
+      cursor: pointer;
+      margin:0;
+    }
+
+    .toggle-track {
+      display: flex;
+      align-items: center;
+      padding: 4px;
+      width: 100%;
+      height: 100%;
+      border-radius: inherit;
+      background-color: #aeaeae;
+      box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.2);
+      transition: background-color 0.3s ease;
+    }
+
+    .toggle-container > .toggle-checkbox:checked + .toggle-track {
+      background-color: #F7BCF1;
+    }
+
+    .toggle-thumb {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow:
+        0 4px 4px rgb(0 0 0 / 0.2),
+        inset 0 -2px 4px rgb(0 0 0 / 0.2);
+      transition: transform 0.25s ease;
+    }
+
+    .toggle-checkbox:checked + .toggle-track > .toggle-thumb {
+      transform: translateX(22px);
+    }
+
+    .actions{
+      display:flex;
+      justify-content:flex-start;
+      align-items:center;
+      gap:16px;
+      margin-top:24px;
+      flex-wrap:wrap;
+    }
+
+    .btn{
+      font-family:Manrope, Inter, sans-serif;
+      font-weight:700;
+      background:var(--cta);
+      color:var(--text);
+      border-radius:999px;
+      border:1px solid rgba(28,29,36,.2);
+      padding:12px 18px;
+      cursor:pointer;
+      box-shadow:var(--shadow-sm);
+    }
+
+    .btn:hover{ transform:translateY(-1px); }
+    .btn:disabled{ opacity:.65; cursor:not-allowed; transform:none; }
+  
+/* ===== ID helper + payload builder ===== */
+.idhelper { margin-top: 18px; text-align: left; }
+.idhelper h3 { font-size: 14px; margin: 14px 0 6px; }
+.idhelper .help { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+.idhelper .btn-row { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+.idhelper .mini-btn {
+  background: var(--cta);
+  border: 1px solid rgba(0,0,0,0.04);
+  color: #1c1d24;
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 6px 14px rgba(0,0,0,0.08);
+}
+.idhelper .mini-btn:hover { filter: brightness(0.98); }
+.idhelper .mini-btn:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
+
+.idhelper .error { color: #b00020; font-size: 12px; margin-top: 6px; }
+
+.idhelper table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+.idhelper th, .idhelper td {
+  padding: 10px 8px;
+  border-top: 1px solid var(--border);
+  vertical-align: middle;
+  font-size: 12px;
+}
+.idhelper th { color: var(--muted); font-weight: 700; text-transform: none; }
+.idhelper code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 11px; }
+
+.idhelper .row-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.idhelper .tiny {
+  background: #fff;
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.idhelper .tiny.primary { background: var(--cta); border-color: rgba(0,0,0,0.04); font-weight: 700; }
+.idhelper .tiny:hover { filter: brightness(0.98); }
+
+.payload { margin-top: 14px; }
+.payload .box {
+  background: #0f1117;
+  color: #d7dde8;
+  border-radius: 12px;
+  padding: 12px;
+  min-height: 120px;
+  white-space: pre;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.payload .payload-actions { display: flex; gap: 10px; margin-top: 10px; }
+
+</style>
+</head>
+
+<body>
+  <div class="container">
+    <header>
+      <img class="logo" src="https://www.mews.com/hubfs/_Project_Phoenix/images/logo/Mews%20Logo.svg" alt="Mews">
+    </header>
+
+    <h1>Mews Configuration Audit</h1>
+    <p class="subtitle">
+      Generate a detailed, table-driven PDF audit report from your Mews configuration using the Connector API.
+    </p>
+
+    <div id="msgOk" class="msg ok"></div>
+    <div id="msgErr" class="msg err"></div>
+
+    <section class="card">
+      <div class="row">
+        <div>
+          <label for="environment">Environment</label>
+          <select id="environment">
+            <option value="product">Production</option>
+            <option value="demo" selected>Demo</option>
+          </select>
+          <div class="hint">Select where the audit should run</div>
+        </div>
+
+        <div>
+          <label for="accessToken">Access token</label>
+          <input id="accessToken" type="password" autocomplete="off">
+          <div class="hint" id="accessTokenHint">Connector API access token</div>
+        </div>
+      </div>
+
+      <div class="toggleRow">
+        <span class="toggleText">Include inactive rates &amp; rate groups</span>
+        <div class="toggle-container">
+          <input id="includeInactive" class="toggle-checkbox" type="checkbox" checked>
+          <div class="toggle-track">
+            <div class="toggle-thumb"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="btn" class="btn">Generate PDF audit</button>
+      </div>
+
+      <!-- ID helper -->
+      <div class="idhelper" id="idHelper">
+        <h3>ID helper</h3>
+        <div class="help">Fetch IDs for common objects and build a JSON snippet you can reuse in API calls.</div>
+
+        <div class="btn-row">
+          <button class="mini-btn" data-item="services" type="button">Get Service IDs</button>
+          <button class="mini-btn" data-item="roomcategories" type="button">Get Room Category IDs</button>
+          <button class="mini-btn" data-item="rates" type="button">Get Rate IDs</button>
+          <button class="mini-btn" data-item="products" type="button">Get Product IDs</button>
+          <button class="mini-btn" data-item="accountingcategories" type="button">Get Accounting Category IDs</button>
+          <button class="mini-btn" data-item="agecategories" type="button">Get Age Category IDs</button>
+        </div>
+
+        <div class="error" id="idError" style="display:none"></div>
+
+        <div id="idResults" style="display:none">
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 32%">Name</th>
+                <th>ID</th>
+                <th style="width: 24%; text-align:right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="idTbody"></tbody>
+          </table>
+        </div>
+
+        <div class="payload" id="payloadSection" style="display:none">
+          <h3>JSON Payload Builder</h3>
+          <div class="box" id="payloadBox">// Click "Add" on any ID to build your JSON payload</div>
+          <div class="payload-actions">
+            <button class="mini-btn" id="copyPayload" type="button">Copy payload</button>
+            <button class="tiny" id="clearPayload" type="button">Clear</button>
+          </div>
+        </div>
+      </div>
+
+    </section>
+  </div>
+
+  <script>
+    const BACKEND = "https://mews-audit-backend.onrender.com";
+
+    const okBox = document.getElementById("msgOk");
+    const errBox = document.getElementById("msgErr");
+    const btn = document.getElementById("btn");
+
+    const envEl = document.getElementById("environment");
+    const accessTokenEl = document.getElementById("accessToken");
+    const includeInactiveEl = document.getElementById("includeInactive");
+
+    const accessTokenHintEl = document.getElementById("accessTokenHint");
+
+    function updateAccessTokenHint(){
+      const env = (envEl && envEl.value) ? envEl.value : "demo";
+      if(!accessTokenHintEl) return;
+      if(env === "demo"){
+        accessTokenHintEl.textContent = "Are you ready to integrate with Mews?";
+      }else{
+        // Production (value is "product" in this UI)
+        accessTokenHintEl.textContent = "To be confirmed";
+      }
+    }
+
+    updateAccessTokenHint();
+    if(envEl){ envEl.addEventListener("change", updateAccessTokenHint); }
+
+    function showOk(t){
+      okBox.textContent = t;
+      okBox.style.display = "block";
+      errBox.style.display = "none";
+    }
+
+    function showErr(t){
+      errBox.textContent = t;
+      errBox.style.display = "block";
+      okBox.style.display = "none";
+    }
+
+    // Optional: hook for future animation logic (as requested)
+    const checkbox = document.querySelector('.toggle-checkbox');
+    checkbox.addEventListener('click', e => e.target.classList.add('toggled-once'), { once: true });
+
+    btn.addEventListener("click", async () => {
+      const environment = envEl.value;
+      const accessToken = accessTokenEl.value.trim();
+      const includeInactive = includeInactiveEl.checked;
+
+      if(!accessToken){
+        showErr("Please enter an access token.");
+        return;
+      }
+
+      btn.disabled = true;
+      showOk("Generating audit…");
+
+      try{
+        const form = new FormData();
+        form.append("access_token", accessToken);
+        form.append("environment", environment);
+        form.append("include_inactive", includeInactive ? "true" : "false");
+        form.append("client", "mews-audit");
+
+        const res = await fetch(`${BACKEND}/audit`, { method:"POST", body:form });
+
+        if(!res.ok){
+          showErr(`Audit failed (HTTP ${res.status})`);
+          btn.disabled = false;
+          return;
+        }
+
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "mews-audit.pdf";
+        a.click();
+        URL.revokeObjectURL(url);
+
+        showOk("Done. Your PDF download should have started.");
+      }catch(e){
+        showErr("Could not reach the backend.");
+      }finally{
+        btn.disabled = false;
+        accessTokenEl.value = "";
+      }
+    });
+  
+  // ===== ID helper + JSON payload builder =====
+  const idError = document.getElementById("idError");
+  const idResults = document.getElementById("idResults");
+  const idTbody = document.getElementById("idTbody");
+  const payloadSection = document.getElementById("payloadSection");
+  const payloadBox = document.getElementById("payloadBox");
+  const copyPayloadBtn = document.getElementById("copyPayload");
+  const clearPayloadBtn = document.getElementById("clearPayload");
+
+  const payloadLines = [];
+
+  function showIdError(msg) {
+    if (!idError) return;
+    idError.textContent = msg || "";
+    idError.style.display = msg ? "block" : "none";
+  }
+
+  function getEnvAndToken() {
+    const environment = (document.getElementById("environment")?.value || "demo").toLowerCase();
+    const accessToken = (document.getElementById("accessToken")?.value || "").trim();
+    return { environment, accessToken };
+  }
+
+  function itemToJsonKey(item) {
+    const map = {
+      services: "ServiceId",
+      // "Room categories" in Mews API are Resource Categories
+      roomcategories: "ResourceCategoryId",
+      rates: "RateId",
+      products: "ProductId",
+      accountingcategories: "AccountingCategoryId",
+      agecategories: "AgeCategoryId",
+    };
+    return map[item] || "Id";
+  }
+
+  function renderPayload() {
+    if (!payloadLines.length) {
+      payloadBox.textContent = '// Click "Add" on any ID to build your JSON payload';
+      payloadSection.style.display = "none";
+      return;
+    }
+    payloadSection.style.display = "block";
+    payloadBox.textContent = payloadLines.join("\n");
+  }
+
+  function addPayloadLine(item, id) {
+    const key = itemToJsonKey(item);
+    const line = `"${key}": "${id}",`;
+    payloadLines.push(line);
+    renderPayload();
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Copied to clipboard");
+    } catch (e) {
+      // fallback
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+      toast("Copied to clipboard");
+    }
+  }
+
+  function normaliseLookupRows(item, data) {
+    // backend returns {items:[{id,name,type}]} (preferred) or {items:[...]} or {enterprise_id:...}
+    if (!data) return [];
+    if (item === "enterprise") {
+      const eid = data.enterprise_id || data.enterpriseId || data.EnterpriseId || data.id;
+      if (!eid) return [];
+      return [{ id: eid, name: "Enterprise", type: "enterprise" }];
+    }
+    const items = data.items || data.Items || data.results || [];
+    return items.map((it) => ({
+      id: it.id || it.Id || it.value || it.Value,
+      name: it.name || it.Name || it.label || it.Label || it.id || it.Id,
+      type: it.type || it.Type || item,
+    })).filter(r => r.id);
+  }
+
+  async function runLookup(item) {
+    const { environment, accessToken } = getEnvAndToken();
+
+    showIdError("");
+    idResults.style.display = "none";
+    idTbody.innerHTML = "";
+
+    if (!accessToken) {
+      showIdError("Missing access token");
+      return;
+    }
+
+    // Disable buttons while loading
+    const buttons = Array.from(document.querySelectorAll('.mini-btn[data-item]'));
+    buttons.forEach(b => b.disabled = true);
+
+    try {
+      const resp = await fetch(BACKEND + "/lookup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          environment,
+          access_token: accessToken,
+          item
+        })
+      });
+
+      const json = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        showIdError(json.error || json.message || `Lookup failed (${resp.status})`);
+        return;
+      }
+
+      const rows = normaliseLookupRows(item, json);
+      if (!rows.length) {
+        showIdError("No results returned.");
+        return;
+      }
+
+      rows.forEach((row) => {
+        const tr = document.createElement("tr");
+
+        const tdName = document.createElement("td");
+        tdName.textContent = row.name || "";
+        tr.appendChild(tdName);
+
+        const tdId = document.createElement("td");
+        const code = document.createElement("code");
+        code.textContent = row.id;
+        tdId.appendChild(code);
+        tr.appendChild(tdId);
+
+        const tdActions = document.createElement("td");
+        tdActions.style.textAlign = "right";
+        const wrap = document.createElement("div");
+        wrap.className = "row-actions";
+
+        const copyBtn = document.createElement("button");
+        copyBtn.className = "tiny";
+        copyBtn.type = "button";
+        copyBtn.textContent = "Copy";
+        copyBtn.addEventListener("click", () => copyText(row.id));
+
+        const addBtn = document.createElement("button");
+        addBtn.className = "tiny primary";
+        addBtn.type = "button";
+        addBtn.textContent = "Add";
+        addBtn.addEventListener("click", () => addPayloadLine(item, row.id));
+
+        wrap.appendChild(copyBtn);
+        wrap.appendChild(addBtn);
+
+        tdActions.appendChild(wrap);
+        tr.appendChild(tdActions);
+
+        idTbody.appendChild(tr);
+      });
+
+      idResults.style.display = "block";
+    } catch (err) {
+      showIdError("Lookup failed. Check backend URL and network connection.");
+    } finally {
+      buttons.forEach(b => b.disabled = false);
+    }
+  }
+
+  // Wire up ID helper buttons
+  document.querySelectorAll('.mini-btn[data-item]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const item = btn.getAttribute("data-item");
+      runLookup(item);
+    });
+  });
+
+  if (copyPayloadBtn) {
+    copyPayloadBtn.addEventListener("click", () => copyText(payloadLines.join("\n")));
+  }
+  if (clearPayloadBtn) {
+    clearPayloadBtn.addEventListener("click", () => {
+      payloadLines.length = 0;
+      renderPayload();
+    });
+  }
+</script>
+</body>
+</html>
