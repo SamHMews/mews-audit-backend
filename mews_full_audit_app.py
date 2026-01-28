@@ -917,31 +917,89 @@ def build_restrictions_table(restrictions: List[Dict[str, Any]],
         return " | ".join(bits)
 
 
-    def summarise_restriction_exceptions(excs: Any) -> str:
-        # Exceptions are usually a list of dicts; keep it short and factual
-        if not isinstance(excs, list) or not excs:
-            return ""
+  def summarise_restriction_exceptions(excs: Any) -> str:
+    """
+    Mews Restrictions/GetAll returns Exceptions either as:
+      - dict (current schema: MinAdvance/MinLength/etc as ISO 8601 duration strings)
+      - list (older/other schema)
+    """
+    def _duration_to_days(dur: Any) -> Optional[int]:
+        # Handles strings like "P0M60DT0H0M0S" and "P60D"
+        if not isinstance(dur, str) or not dur.startswith("P"):
+            return None
+        try:
+            # Extract the number just before "D" in the date portion.
+            # We intentionally ignore months/years because in practice we see day-only durations here.
+            date_part = dur.split("T")[0]  # e.g. "P0M60D"
+            if "D" not in date_part:
+                return None
+            # Keep only digits immediately preceding D
+            before_d = date_part.split("D")[0]  # "P0M60"
+            digits = ""
+            for ch in reversed(before_d):
+                if ch.isdigit():
+                    digits = ch + digits
+                else:
+                    if digits:
+                        break
+            return int(digits) if digits else None
+        except Exception:
+            return None
+
+    # --- NEW: dict/object exceptions (your tenant schema) ---
+    if isinstance(excs, dict) and excs:
         out: List[str] = []
-        for e in excs:
-            if not isinstance(e, dict):
-                continue
-            # Try common keys without assuming schema too hard
-            # Examples we see in tenants: Type/Value, Dates, StartUtc/EndUtc, WeekDays etc.
-            typ = e.get("Type") or e.get("ExceptionType") or ""
-            val = e.get("Value") or e.get("Values") or ""
-            s = e.get("StartUtc") or ""
-            en = e.get("EndUtc") or ""
-            if s or en:
-                out.append(f"{typ}:{s}→{en}".strip(":"))
-            elif val:
-                out.append(f"{typ}:{val}".strip(":"))
-            else:
-                # fallback: first couple of keys
-                keys = list(e.keys())[:3]
-                out.append(",".join(keys))
-            if len(out) >= 4:
-                break
-        return " | ".join([x for x in out if x])
+
+        min_adv_days = _duration_to_days(excs.get("MinAdvance"))
+        if min_adv_days is not None:
+            out.append(f"Minimum advance: {min_adv_days} days")
+
+        max_adv_days = _duration_to_days(excs.get("MaxAdvance"))
+        if max_adv_days is not None:
+            out.append(f"Maximum advance: {max_adv_days} days")
+
+        min_len_days = _duration_to_days(excs.get("MinLength"))
+        if min_len_days is not None:
+            out.append(f"Minimum length: {min_len_days} nights")
+
+        max_len_days = _duration_to_days(excs.get("MaxLength"))
+        if max_len_days is not None:
+            out.append(f"Maximum length: {max_len_days} nights")
+
+        # Prices / counts (if ever used)
+        if excs.get("MinPrice") is not None:
+            out.append(f"Minimum price: {excs.get('MinPrice')}")
+        if excs.get("MaxPrice") is not None:
+            out.append(f"Maximum price: {excs.get('MaxPrice')}")
+        if excs.get("MinReservationCount") is not None:
+            out.append(f"Minimum reservations: {excs.get('MinReservationCount')}")
+        if excs.get("MaxReservationCount") is not None:
+            out.append(f"Maximum reservations: {excs.get('MaxReservationCount')}")
+
+        return " | ".join(out[:4])
+
+    # --- Existing behaviour: list exceptions ---
+    if not isinstance(excs, list) or not excs:
+        return ""
+    out2: List[str] = []
+    for e in excs:
+        if not isinstance(e, dict):
+            continue
+        typ = e.get("Type") or e.get("ExceptionType") or ""
+        val = e.get("Value") or e.get("Values") or ""
+        s = e.get("StartUtc") or ""
+        en = e.get("EndUtc") or ""
+        if s or en:
+            out2.append(f"{typ}:{s}→{en}".strip(":"))
+        elif val:
+            out2.append(f"{typ}:{val}".strip(":"))
+        else:
+            keys = list(e.keys())[:3]
+            out2.append(",".join(keys))
+        if len(out2) >= 4:
+            break
+    return " | ".join([x for x in out2 if x])
+
 
     rows: List[Dict[str, Any]] = []
     for r in restrictions:
@@ -965,14 +1023,30 @@ def build_restrictions_table(restrictions: List[Dict[str, Any]],
         if end_dt and end_dt < now:
             continue
 
-        rate_bits: List[str] = []
-        if cond.get("RateId"):
-            br = rate_by_id.get(cond.get("RateId"))
-            rate_bits.append("Rate: " + (pick_name(br) if br else ""))
-        if cond.get("RateGroupId"):
-            g = rg_by_id.get(cond.get("RateGroupId"))
-            rate_bits.append("Group: " + (pick_name(g) if g else ""))
-        rates_scope = "; ".join([b for b in rate_bits if b.strip()]) or "All rates"
+
+def _rate_name(rate_obj: Any) -> str:
+    if not isinstance(rate_obj, dict):
+        return ""
+    return (pick_name(rate_obj) or rate_obj.get("Code") or rate_obj.get("Name") or "") or ""
+
+rate_bits: List[str] = []
+
+# NEW: Exact rate (matches Mews UI “Exact rate: …”)
+if cond.get("ExactRateId"):
+    rr = rate_by_id.get(cond.get("ExactRateId"))
+    rate_bits.append("Exact rate: " + (_rate_name(rr) or str(cond.get("ExactRateId"))))
+
+# Existing: generic rate + group (kept for backwards compatibility)
+if cond.get("RateId"):
+    br = rate_by_id.get(cond.get("RateId"))
+    rate_bits.append("Rate: " + (_rate_name(br) or str(cond.get("RateId"))))
+
+if cond.get("RateGroupId"):
+    g = rg_by_id.get(cond.get("RateGroupId"))
+    gname = pick_name(g) if isinstance(g, dict) else ""
+    rate_bits.append("Group: " + (gname or str(cond.get("RateGroupId"))))
+
+rates_scope = "; ".join([b for b in rate_bits if b.strip()]) or "All rates"
 
         spaces_scope = "All spaces"
         if cond.get("ResourceCategoryId"):
