@@ -991,18 +991,24 @@ def build_restrictions_table(restrictions: List[Dict[str, Any]],
             continue
 
         
-def _rate_name(rate_obj: Any) -> str:
-    if not isinstance(rate_obj, dict):
-        return ""
-    return pick_name(rate_obj) or ""
+        rate_bits: List[str] = []
 
-rate_bits: List[str] = []
+        if cond.get("ExactRateId"):
+            rr = rate_by_id.get(cond.get("ExactRateId"))
+            rr_name = (pick_name(rr) if isinstance(rr, dict) else "") or str(cond.get("ExactRateId"))
+            rate_bits.append("Exact rate: " + rr_name)
 
-if cond.get("ExactRateId"):
-    rr = rate_by_id.get(cond.get("ExactRateId"))
-    rate_bits.append("Exact rate: " + (_rate_name(rr) or str(cond.get("ExactRateId"))))
+        if cond.get("RateId"):
+            br = rate_by_id.get(cond.get("RateId"))
+            br_name = (pick_name(br) if isinstance(br, dict) else "") or str(cond.get("RateId"))
+            rate_bits.append("Rate: " + br_name)
 
-rates_scope = "; ".join(rate_bits) or "All rates"
+        if cond.get("RateGroupId"):
+            g = rg_by_id.get(cond.get("RateGroupId"))
+            g_name = (pick_name(g) if isinstance(g, dict) else "") or str(cond.get("RateGroupId"))
+            rate_bits.append("Group: " + g_name)
+
+        rates_scope = "; ".join([b for b in rate_bits if b.strip()]) or "All rates"
 
 
         spaces_scope = "All spaces"
