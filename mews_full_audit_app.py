@@ -1277,7 +1277,19 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str, include_
         currency = ent.get("DefaultCurrency") or ent.get("Currency")
 
     st_tax, err_tax = status_for(["tax_environments_getall", "taxations_getall"], "PASS" if (tax_envs or taxations) else "WARN")
-    summary = f"TaxEnvironments={len(tax_envs)}, Taxations={len(taxations)}"
+
+    # Extract unique codes from tax environments and taxations
+    tax_env_codes = sorted({env.get("Code") for env in tax_envs if isinstance(env, dict) and env.get("Code")})
+    taxation_codes = sorted({tax.get("Code") for tax in taxations if isinstance(tax, dict) and tax.get("Code")})
+
+    # Format summary showing both
+    parts = []
+    if tax_env_codes:
+        parts.append(f"TaxEnv: {', '.join(tax_env_codes)}")
+    if taxation_codes:
+        parts.append(f"Taxations: {', '.join(taxation_codes)}")
+
+    summary = " | ".join(parts) if parts else "No tax configuration found"
     if err_tax:
         summary += f" | {err_tax}"
     legal_items.append(CheckItem("Time zone", "PASS" if tz else "WARN", str(tz or "Not identified"), "Connector: Configuration/Get", "Set enterprise/property time zone in Mews if missing.", {}, "High" if not tz else "Low"))
