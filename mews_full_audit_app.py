@@ -2,6 +2,8 @@ import os
 import time
 import traceback
 import logging
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,6 +11,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 from flask import Flask, request, jsonify, send_file, render_template_string, send_from_directory
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 from reportlab.lib import colors
 
@@ -38,6 +42,16 @@ from reportlab.graphics import renderPDF
 
 
 # =========================
+# LOGGING
+# =========================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+logger = logging.getLogger("mews_audit")
+
+# =========================
 # CONFIG
 # =========================
 
@@ -58,8 +72,27 @@ MEWS_API_BASE_DEMO = os.getenv("MEWS_API_BASE_DEMO", DEFAULT_API_BASE).rstrip("/
 MEWS_API_BASE_PRODUCT = os.getenv("MEWS_API_BASE_PRODUCT", "https://api.mews.com/api/connector/v1").rstrip("/")
 
 DEFAULT_CLIENT_NAME = os.getenv("MEWS_CLIENT_NAME", "Mews Audit Tool 1.0.0")
-DEFAULT_TIMEOUT = int(os.getenv("MEWS_HTTP_TIMEOUT_SECONDS", "30"))
-MAX_PDF_MB = int(os.getenv("MAX_PDF_MB", "18"))
+
+def _safe_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logging.warning("Invalid integer for env var %s=%r, using default %d", name, raw, default)
+        return default
+
+DEFAULT_TIMEOUT = _safe_int_env("MEWS_HTTP_TIMEOUT_SECONDS", 30)
+MAX_PDF_MB = _safe_int_env("MAX_PDF_MB", 18)
+
+# Pagination / data collection limits
+MAX_RECORDS_PER_ENDPOINT = 50000
+MAX_PAGES_PER_ENDPOINT = 200
+PAYMENT_PAGE_SIZE = 500
+PAYMENT_HARD_LIMIT = 20000
+PAYMENT_ORIGIN_HARD_LIMIT = 1000
+AVAILABILITY_BLOCK_CHUNK_HOURS = 96
 
 ENV_CONFIG = {
     "demo": {"base_url": MEWS_API_BASE_DEMO, "client_token": MEWS_CLIENT_TOKEN_DEMO},
@@ -105,21 +138,29 @@ def pick_name(obj: Any) -> str:
     return ""
 
 
-def resolve_env_tokens(environment: str) -> Tuple[str, str]:
-    """
-    Map the incoming environment selector to:
-      - api_base_url
-      - client_token
+def _deduplicate_by_id(items: List[Dict[str, Any]], seen: set) -> List[Dict[str, Any]]:
+    """Deduplicate a list of dicts by their 'Id' field, updating `seen` in place."""
+    out: List[Dict[str, Any]] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("Id")
+        if item_id and item_id not in seen:
+            seen.add(item_id)
+            out.append(item)
+    return out
 
-    Frontend sends: environment = "demo" or "product" (legacy value meaning Production).
-    """
-    env = (environment or "").strip().lower()
-    if env in ("production", "prod"):
-        env = "product"
-    if env in ("product", "live"):
-        return (MEWS_API_BASE_PRODUCTION or DEFAULT_API_BASE), MEWS_CLIENT_TOKEN_PRODUCTION
-    # default demo
-    return (MEWS_API_BASE_DEMO or DEFAULT_API_BASE), MEWS_CLIENT_TOKEN_DEMO
+
+def _count_by_field(records: List[Dict[str, Any]], field: str) -> List[Dict[str, Any]]:
+    """Count occurrences of a field value across records, returning sorted [{field: value, Count: n}]."""
+    counts: Dict[str, int] = {}
+    for rec in records or []:
+        value = (rec.get(field) or "None").strip() if isinstance(rec, dict) else "None"
+        if not value:
+            value = "None"
+        counts[value] = counts.get(value, 0) + 1
+    return [{field: k, "Count": v} for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
 
 def chunk_list(items: List[Any], size: int) -> List[List[Any]]:
     if size <= 0:
@@ -152,6 +193,10 @@ class MewsConnector:
         self.client_name = client_name
         self.calls: List[ApiCall] = []
 
+    _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+    _MAX_RETRIES = 2
+    _RETRY_BACKOFF_BASE = 1.5  # seconds
+
     def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.base_url}/{path.lstrip('/')}"
         body = dict(payload)
@@ -159,35 +204,70 @@ class MewsConnector:
         body.setdefault("AccessToken", self.access_token)
         body.setdefault("Client", self.client_name)
 
-        t0 = time.time()
-        resp = None
-        try:
-            resp = requests.post(url, json=body, timeout=DEFAULT_TIMEOUT)
-            dt = int((time.time() - t0) * 1000)
-
+        last_exc: Optional[Exception] = None
+        for attempt in range(1 + self._MAX_RETRIES):
+            t0 = time.time()
+            resp = None
             try:
-                data = resp.json()
-            except Exception:
-                data = {"_raw": resp.text}
+                resp = requests.post(url, json=body, timeout=DEFAULT_TIMEOUT)
+                dt = int((time.time() - t0) * 1000)
 
-            self.calls.append(ApiCall(
-                operation=path,
-                ok=bool(resp.ok),
-                status_code=resp.status_code,
-                duration_ms=dt,
-                error=None if resp.ok else (data.get("Message") if isinstance(data, dict) else str(data))
-            ))
+                try:
+                    data = resp.json()
+                except ValueError:
+                    data = {"_raw": resp.text}
 
-            if not resp.ok:
-                raise RuntimeError(f"HTTP {resp.status_code} for {path}: {data}")
-            if not isinstance(data, dict):
-                raise RuntimeError(f"Unexpected JSON shape for {path}: {type(data)}")
-            return data
-        except Exception as e:
-            dt = int((time.time() - t0) * 1000)
-            if resp is None:
-                self.calls.append(ApiCall(operation=path, ok=False, status_code=None, duration_ms=dt, error=str(e)))
-            raise
+                self.calls.append(ApiCall(
+                    operation=path,
+                    ok=bool(resp.ok),
+                    status_code=resp.status_code,
+                    duration_ms=dt,
+                    error=None if resp.ok else (data.get("Message") if isinstance(data, dict) else str(data))
+                ))
+
+                # Retry on transient HTTP errors
+                if resp.status_code in self._RETRYABLE_STATUS_CODES and attempt < self._MAX_RETRIES:
+                    wait = self._RETRY_BACKOFF_BASE * (2 ** attempt)
+                    # Respect Retry-After header for 429
+                    if resp.status_code == 429:
+                        retry_after = resp.headers.get("Retry-After")
+                        if retry_after:
+                            try:
+                                wait = max(wait, float(retry_after))
+                            except ValueError:
+                                pass
+                    logging.warning("Retryable HTTP %d for %s (attempt %d/%d), waiting %.1fs",
+                                    resp.status_code, path, attempt + 1, 1 + self._MAX_RETRIES, wait)
+                    time.sleep(wait)
+                    continue
+
+                if not resp.ok:
+                    raise RuntimeError(f"HTTP {resp.status_code} for {path}: {data}")
+                if not isinstance(data, dict):
+                    raise RuntimeError(f"Unexpected JSON shape for {path}: {type(data)}")
+                return data
+            except (requests.ConnectionError, requests.Timeout) as e:
+                dt = int((time.time() - t0) * 1000)
+                if resp is None:
+                    self.calls.append(ApiCall(operation=path, ok=False, status_code=None, duration_ms=dt, error=str(e)))
+                last_exc = e
+                if attempt < self._MAX_RETRIES:
+                    wait = self._RETRY_BACKOFF_BASE * (2 ** attempt)
+                    logging.warning("Network error for %s (attempt %d/%d): %s, waiting %.1fs",
+                                    path, attempt + 1, 1 + self._MAX_RETRIES, e, wait)
+                    time.sleep(wait)
+                    continue
+                raise
+            except Exception as e:
+                dt = int((time.time() - t0) * 1000)
+                if resp is None:
+                    self.calls.append(ApiCall(operation=path, ok=False, status_code=None, duration_ms=dt, error=str(e)))
+                raise
+
+        # Should not reach here, but safety net
+        if last_exc:
+            raise last_exc
+        raise RuntimeError(f"Max retries exceeded for {path}")
 
     def get(self, domain: str, operation: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._post(f"{domain}/{operation}", payload)
@@ -199,7 +279,7 @@ class MewsConnector:
         base_payload: Dict[str, Any],
         result_key: str,
         count_per_page: int = 1000,
-        hard_limit: int = 50000,
+        hard_limit: int = MAX_RECORDS_PER_ENDPOINT,
     ) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         cursor: Optional[str] = None
@@ -227,7 +307,7 @@ class MewsConnector:
             cursor = data.get("Cursor")
             if not cursor:
                 break
-            if len(out) >= hard_limit or pages > 200:
+            if len(out) >= hard_limit or pages > MAX_PAGES_PER_ENDPOINT:
                 break
 
         return out
@@ -237,7 +317,7 @@ class MewsConnector:
 # DATA COLLECTION (v6)
 # =========================
 
-def collect_data(base_url, client_token, access_token: str, client_name: str = DEFAULT_CLIENT_NAME) -> Dict[str, Any]:
+def collect_data(base_url: str, client_token: str, access_token: str, client_name: str = DEFAULT_CLIENT_NAME) -> Dict[str, Any]:
     mc = MewsConnector(base_url, client_token, access_token, client_name)
     errors: Dict[str, str] = {}
 
@@ -265,10 +345,25 @@ def collect_data(base_url, client_token, access_token: str, client_name: str = D
     service_ids = [s.get("Id") for s in services if isinstance(s, dict) and s.get("Id")]
 
     if service_ids:
-        rate_groups = fetch_list("rate_groups_getall", "RateGroups", "GetAll", {"ServiceIds": service_ids}, "RateGroups")
-        rates = fetch_list("rates_getall", "Rates", "GetAll", {"ServiceIds": service_ids}, "Rates")
-        products = fetch_list("products_getall", "Products", "GetAll", {"ServiceIds": service_ids}, "Products")
-        restrictions = fetch_list("restrictions_getall", "Restrictions", "GetAll", {"ServiceIds": service_ids}, "Restrictions")
+        # Parallelize independent API calls for better performance
+        _parallel_results: Dict[str, Any] = {}
+        def _parallel_fetch(name, *args, **kwargs):
+            _parallel_results[name] = fetch_list(*args, **kwargs)
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = [
+                executor.submit(_parallel_fetch, "rate_groups", "rate_groups_getall", "RateGroups", "GetAll", {"ServiceIds": service_ids}, "RateGroups"),
+                executor.submit(_parallel_fetch, "rates", "rates_getall", "Rates", "GetAll", {"ServiceIds": service_ids}, "Rates"),
+                executor.submit(_parallel_fetch, "products", "products_getall", "Products", "GetAll", {"ServiceIds": service_ids}, "Products"),
+                executor.submit(_parallel_fetch, "restrictions", "restrictions_getall", "Restrictions", "GetAll", {"ServiceIds": service_ids}, "Restrictions"),
+            ]
+            for f in as_completed(futures):
+                f.result()  # propagate exceptions
+
+        rate_groups = _parallel_results.get("rate_groups", [])
+        rates = _parallel_results.get("rates", [])
+        products = _parallel_results.get("products", [])
+        restrictions = _parallel_results.get("restrictions", [])
         # Availability blocks (next 90 days) — chunk CollidingUtc windows (API enforces a max interval)
         availability_blocks: List[Dict[str, Any]] = []
         try:
@@ -276,7 +371,7 @@ def collect_data(base_url, client_token, access_token: str, client_name: str = D
             end = start + timedelta(days=90)
 
             # The API can reject long CollidingUtc windows; use <=96h chunks for safety.
-            step = timedelta(hours=96)
+            step = timedelta(hours=AVAILABILITY_BLOCK_CHUNK_HOURS)
             cursor = start
 
             seen_ids: set[str] = set()
@@ -332,13 +427,7 @@ def collect_data(base_url, client_token, access_token: str, client_name: str = D
             # Rules/GetAll requires ServiceIds. To avoid the entire call failing when some services
             # are out of scope for the token, fetch per-service and merge.
             errors_per_service: List[str] = []
-
-            seen_rules: set[str] = set()
-            seen_actions: set[str] = set()
-            seen_rates: set[str] = set()
-            seen_rate_groups: set[str] = set()
-            seen_rcats: set[str] = set()
-            seen_segments: set[str] = set()
+            seen_sets: Dict[str, set] = {k: set() for k in rules_bundle}
 
             for sid in [s for s in service_ids if s]:
                 payload = {
@@ -355,47 +444,10 @@ def collect_data(base_url, client_token, access_token: str, client_name: str = D
                 if not isinstance(data_rules, dict):
                     continue
 
-                for r in (data_rules.get("Rules") or []):
-                    if isinstance(r, dict):
-                        rid = r.get("Id")
-                        if rid and rid not in seen_rules:
-                            seen_rules.add(rid)
-                            rules_bundle["Rules"].append(r)
-
-                for a in (data_rules.get("RuleActions") or []):
-                    if isinstance(a, dict):
-                        aid = a.get("Id")
-                        if aid and aid not in seen_actions:
-                            seen_actions.add(aid)
-                            rules_bundle["RuleActions"].append(a)
-
-                for rr in (data_rules.get("Rates") or []):
-                    if isinstance(rr, dict):
-                        xid = rr.get("Id")
-                        if xid and xid not in seen_rates:
-                            seen_rates.add(xid)
-                            rules_bundle["Rates"].append(rr)
-
-                for rg in (data_rules.get("RateGroups") or []):
-                    if isinstance(rg, dict):
-                        xid = rg.get("Id")
-                        if xid and xid not in seen_rate_groups:
-                            seen_rate_groups.add(xid)
-                            rules_bundle["RateGroups"].append(rg)
-
-                for rc in (data_rules.get("ResourceCategories") or []):
-                    if isinstance(rc, dict):
-                        xid = rc.get("Id")
-                        if xid and xid not in seen_rcats:
-                            seen_rcats.add(xid)
-                            rules_bundle["ResourceCategories"].append(rc)
-
-                for bs in (data_rules.get("BusinessSegments") or []):
-                    if isinstance(bs, dict):
-                        xid = bs.get("Id")
-                        if xid and xid not in seen_segments:
-                            seen_segments.add(xid)
-                            rules_bundle["BusinessSegments"].append(bs)
+                for key in rules_bundle:
+                    rules_bundle[key].extend(
+                        _deduplicate_by_id(data_rules.get(key) or [], seen_sets[key])
+                    )
 
             if errors_per_service:
                 errors["rules_getall"] = " | ".join(errors_per_service[:5])
@@ -451,7 +503,7 @@ def collect_data(base_url, client_token, access_token: str, client_name: str = D
             "Payments", "GetAll",
             {"EnterpriseIds": enterprises, "CreatedUtc": {"StartUtc": start, "EndUtc": end}},
             "Payments",
-            count_per_page=500, hard_limit=20000,
+            count_per_page=PAYMENT_PAGE_SIZE, hard_limit=PAYMENT_HARD_LIMIT,
         )
     except Exception as e:
         errors["payments_getall"] = str(e)
@@ -467,15 +519,9 @@ def collect_data(base_url, client_token, access_token: str, client_name: str = D
             {"EnterpriseIds": enterprises, "CreatedUtc": {"StartUtc": start90, "EndUtc": end90}, "States": ["Charged"]},
             "Payments",
             count_per_page=1000,
-            hard_limit=1000,
+            hard_limit=PAYMENT_ORIGIN_HARD_LIMIT,
         )
-        counts: Dict[str, int] = {}
-        for pmt in payments_90d_charged or []:
-            origin = (pmt.get("PaymentOrigin") or "None").strip() if isinstance(pmt, dict) else "None"
-            if not origin:
-                origin = "None"
-            counts[origin] = counts.get(origin, 0) + 1
-        payment_origin_counts_charged_90d = [{"PaymentOrigin": k, "Count": v} for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+        payment_origin_counts_charged_90d = _count_by_field(payments_90d_charged, "PaymentOrigin")
     except Exception as e:
         errors["payments_origin_charged_90d"] = str(e)
         payment_origin_counts_charged_90d = []
@@ -488,15 +534,9 @@ def collect_data(base_url, client_token, access_token: str, client_name: str = D
             {"EnterpriseIds": enterprises, "CreatedUtc": {"StartUtc": start90, "EndUtc": end90}, "States": ["Cancelled", "Failed"]},
             "Payments",
             count_per_page=1000,
-            hard_limit=1000,
+            hard_limit=PAYMENT_ORIGIN_HARD_LIMIT,
         )
-        counts: Dict[str, int] = {}
-        for pmt in payments_90d_failed or []:
-            origin = (pmt.get("PaymentOrigin") or "None").strip() if isinstance(pmt, dict) else "None"
-            if not origin:
-                origin = "None"
-            counts[origin] = counts.get(origin, 0) + 1
-        payment_origin_counts_failed_90d = [{"PaymentOrigin": k, "Count": v} for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+        payment_origin_counts_failed_90d = _count_by_field(payments_90d_failed, "PaymentOrigin")
     except Exception as e:
         errors["payments_origin_failed_90d"] = str(e)
         payment_origin_counts_failed_90d = []
@@ -526,8 +566,6 @@ def collect_data(base_url, client_token, access_token: str, client_name: str = D
         "resource_categories": resource_categories,
         "resource_category_assignments": resource_category_assignments,
         "restrictions": restrictions,
-        "availability_blocks": availability_blocks,
-        "rules_bundle": rules_bundle,
         "availability_blocks": availability_blocks,
         "rules_bundle": rules_bundle,
         "payments": payments,
@@ -663,29 +701,6 @@ def configured_tax_percent_for_product(product: Dict[str, Any], taxations: List[
     if not isinstance(tx, dict):
         return ""
 
-    for k in ("Rate", "Percentage", "Percent", "Value"):
-        v = safe_float(tx.get(k))
-        if v is not None:
-            if 0 < v <= 1:
-                v = v * 100
-            return f"{v:.2f}%"
-    return ""
-    taxation_id = (
-        product.get("TaxationId")
-        or product.get("TaxId")
-        or product.get("Taxation")
-        or (product.get("Taxations")[0] if isinstance(product.get("Taxations"), list) and product.get("Taxations") else None)
-        or (product.get("TaxationIds")[0] if isinstance(product.get("TaxationIds"), list) and product.get("TaxationIds") else None)
-    )
-    if not taxation_id or not isinstance(taxations, list):
-        return ""
-    tx = None
-    for t in taxations:
-        if isinstance(t, dict) and t.get("Id") == taxation_id:
-            tx = t
-            break
-    if not isinstance(tx, dict):
-        return ""
     for k in ("Rate", "Percentage", "Percent", "Value"):
         v = safe_float(tx.get(k))
         if v is not None:
@@ -946,27 +961,6 @@ def build_restrictions_table(restrictions: List[Dict[str, Any]],
             return " | ".join(out)
 
         return ""
-        out: List[str] = []
-        for e in excs:
-            if not isinstance(e, dict):
-                continue
-            # Try common keys without assuming schema too hard
-            # Examples we see in tenants: Type/Value, Dates, StartUtc/EndUtc, WeekDays etc.
-            typ = e.get("Type") or e.get("ExceptionType") or ""
-            val = e.get("Value") or e.get("Values") or ""
-            s = e.get("StartUtc") or ""
-            en = e.get("EndUtc") or ""
-            if s or en:
-                out.append(f"{typ}:{s}→{en}".strip(":"))
-            elif val:
-                out.append(f"{typ}:{val}".strip(":"))
-            else:
-                # fallback: first couple of keys
-                keys = list(e.keys())[:3]
-                out.append(",".join(keys))
-            if len(out) >= 4:
-                break
-        return " | ".join([x for x in out if x])
 
     rows: List[Dict[str, Any]] = []
     for r in restrictions:
@@ -1502,18 +1496,27 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str, include_
     )
 
 
+_cached_logo = None
+_logo_fetched = False
+
 def fetch_logo():
+    global _cached_logo, _logo_fetched
+    if _logo_fetched:
+        return _cached_logo
+    _logo_fetched = True
     if not LOGO_URL:
         return None
     try:
-        resp = requests.get(LOGO_URL, timeout=10)
+        resp = requests.get(LOGO_URL, timeout=DEFAULT_TIMEOUT)
         if not resp.ok:
             return None
         tmp = "/tmp/logo.svg"
         with open(tmp, "wb") as f:
             f.write(resp.content)
-        return svg2rlg(tmp)
+        _cached_logo = svg2rlg(tmp)
+        return _cached_logo
     except Exception:
+        logging.warning("Failed to fetch logo from %s", LOGO_URL)
         return None
 
 
@@ -1949,8 +1952,22 @@ code{background:#0c1426;padding:2px 6px;border-radius:8px;border:1px solid #1f2b
 """
 
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "mews-audit-secret")
-CORS(app, resources={r"/*": {"origins": "*"}})
+_secret = os.getenv("FLASK_SECRET_KEY")
+if not _secret:
+    logging.warning("FLASK_SECRET_KEY not set — using random key. Set this env var in production.")
+    import secrets as _secrets
+    _secret = _secrets.token_hex(32)
+app.secret_key = _secret
+
+_cors_origins = os.getenv("CORS_ORIGINS", "*")
+CORS(app, resources={r"/*": {"origins": _cors_origins.split(",")}})
+
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+)
 
 @app.route("/", methods=["GET"])
 def serve_frontend():
@@ -1985,6 +2002,7 @@ def _extract_param(name: str) -> Optional[str]:
 
 
 @app.post("/lookup")
+@limiter.limit("30/minute")
 def lookup_ids():
     """
     ID helper endpoint for the frontend.
@@ -2173,11 +2191,14 @@ def lookup_ids():
         })
     except Exception as e:
         logging.exception("LOOKUP ERROR")
-        return jsonify({"ok": False, "error": "lookup_failed", "details": str(e)}), 200
+        return jsonify({"ok": False, "error": "lookup_failed", "details": str(e)}), 500
 
 
 @app.post("/audit")
+@limiter.limit("10/minute")
 def audit():
+    request_id = str(uuid.uuid4())[:8]
+    t_start = time.time()
     try:
         # Inputs (supports both JSON and multipart/form-data)
         at = _extract_param("access_token")
@@ -2202,11 +2223,8 @@ def audit():
             if not base_url:
                 base_url = DEFAULT_API_BASE
 
-        # Log selected environment + base URL (safe, no secrets)
-        try:
-            app.logger.info("Audit request: environment=%s api_base=%s include_inactive=%s", env, base_url, include_inactive)
-        except Exception:
-            pass
+        logger.info("Audit request [%s]: environment=%s api_base=%s include_inactive=%s",
+                    request_id, env, base_url, include_inactive)
 
         if not at:
             return jsonify({"ok": False, "error": "Missing access_token"}), 400
@@ -2224,41 +2242,23 @@ def audit():
         # If everything failed, return a clean HTTP 400 instead of generating an empty PDF.
 
         try:
-
             errs = data.get("errors") or {}
-
             calls = data.get("api_calls") or []
-
             all_failed = bool(calls) and all((isinstance(c, dict) and not c.get("ok")) for c in calls)
 
             if all_failed or ("configuration_get" in errs and errs.get("configuration_get")):
-
-                # Summarise first few call outcomes without leaking secrets
-
                 brief = []
-
                 for c in calls[:5]:
-
                     if isinstance(c, dict):
-
                         brief.append(f'{c.get("operation")} -> HTTP {c.get("status_code")}')
-
                 return jsonify({
-
                     "error": "All API calls failed.",
-
                     "details": "Common causes: (1) Demo vs Production token mismatch, (2) missing Render env vars DEMO/PRODUCTION, (3) wrong API base for Production. Ensure the access token and client token are from the same environment.",
-
                     "environment": env,
-
                     "api_base": base_url,
-
-                    "first_calls": brief
-
-                }), 400
-
+                    "first_calls": brief,
+                }), 502
         except Exception:
-
             pass
         report = build_report(
             data=data,
@@ -2275,17 +2275,22 @@ def audit():
         fn = f"mews-audit-{report.enterprise_id or 'enterprise'}-{utc_now().strftime('%Y%m%d-%H%M%S')}.pdf"
         resp = send_file(bio, mimetype="application/pdf", as_attachment=True, download_name=fn)
         # Expose environment/base for debugging (headers only, not in PDF)
-        try:
-            resp.headers['X-Audit-Environment'] = env
-            resp.headers['X-Audit-Api-Base'] = base_url
-        except Exception:
-            pass
+        resp.headers['X-Request-Id'] = request_id
+        resp.headers['X-Audit-Environment'] = env
+        resp.headers['X-Audit-Api-Base'] = base_url
+        # Surface partial failures as a warning header
+        errs = data.get("errors") or {}
+        if errs:
+            failed_keys = list(errs.keys())[:10]
+            resp.headers['X-Audit-Warnings'] = f"Partial API failures: {', '.join(failed_keys)}"
+        elapsed = int((time.time() - t_start) * 1000)
+        logger.info("Audit completed [%s]: enterprise=%s pdf_bytes=%d elapsed_ms=%d",
+                     request_id, report.enterprise_name, len(pdf), elapsed)
         return resp
     except Exception as e:
-        err = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-        print("AUDIT ERROR")
-        print(err)
-        return jsonify({"ok": False, "error": str(e), "trace": err}), 500
+        elapsed = int((time.time() - t_start) * 1000)
+        logger.exception("Audit error [%s]: elapsed_ms=%d", request_id, elapsed)
+        return jsonify({"ok": False, "error": "An internal error occurred. Please try again or contact support."}), 500
 
 
 
