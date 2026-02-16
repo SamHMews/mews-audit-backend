@@ -1282,12 +1282,18 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str, include_
     tax_env_codes = sorted({env.get("Code") for env in tax_envs if isinstance(env, dict) and env.get("Code")})
     taxation_codes = sorted({tax.get("Code") for tax in taxations if isinstance(tax, dict) and tax.get("Code")})
 
-    # Format summary showing both
+    # Format summary showing both (limit to first 5 codes to prevent PDF layout issues)
     parts = []
     if tax_env_codes:
-        parts.append(f"TaxEnv: {', '.join(tax_env_codes)}")
+        codes_display = ', '.join(tax_env_codes[:5])
+        if len(tax_env_codes) > 5:
+            codes_display += f" (+{len(tax_env_codes) - 5} more)"
+        parts.append(f"TaxEnv: {codes_display}")
     if taxation_codes:
-        parts.append(f"Taxations: {', '.join(taxation_codes)}")
+        codes_display = ', '.join(taxation_codes[:5])
+        if len(taxation_codes) > 5:
+            codes_display += f" (+{len(taxation_codes) - 5} more)"
+        parts.append(f"Taxations: {codes_display}")
 
     summary = " | ".join(parts) if parts else "No tax configuration found"
     if err_tax:
