@@ -285,6 +285,42 @@
 }
 .payload .payload-actions { display: flex; gap: 10px; margin-top: 10px; }
 
+/* Toast notification */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(80px);
+  background: #1C1D24;
+  color: #fff;
+  padding: 10px 20px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  opacity: 0;
+  transition: opacity 0.3s, transform 0.3s;
+  z-index: 9999;
+  pointer-events: none;
+}
+.toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* Loading spinner */
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--text);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  vertical-align: middle;
+  margin-right: 8px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
 </style>
 </head>
 
@@ -375,9 +411,22 @@
 
     </section>
   </div>
+  <div id="toastEl" class="toast"></div>
 
   <script>
-    const BACKEND = "https://mews-audit-backend.onrender.com";
+    const BACKEND = window.location.origin;
+    const AUDIT_TIMEOUT_MS = 120000; // 2 minutes for PDF generation
+    const LOOKUP_TIMEOUT_MS = 30000; // 30 seconds for ID lookups
+
+    const toastEl = document.getElementById("toastEl");
+    let toastTimer = null;
+    function toast(msg) {
+      if (!toastEl) return;
+      toastEl.textContent = msg;
+      toastEl.classList.add("show");
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toastEl.classList.remove("show"), 2500);
+    }
 
     const okBox = document.getElementById("msgOk");
     const errBox = document.getElementById("msgErr");
@@ -430,7 +479,12 @@
       }
 
       btn.disabled = true;
-      showOk("Generating audit…");
+      okBox.innerHTML = '<span class="spinner"></span> Generating audit&hellip; This may take up to a minute.';
+      okBox.style.display = "block";
+      errBox.style.display = "none";
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), AUDIT_TIMEOUT_MS);
 
       try{
         const form = new FormData();
@@ -439,10 +493,14 @@
         form.append("include_inactive", includeInactive ? "true" : "false");
         form.append("client", "mews-audit");
 
-        const res = await fetch(`${BACKEND}/audit`, { method:"POST", body:form });
+        const res = await fetch(`${BACKEND}/audit`, { method:"POST", body:form, signal:controller.signal });
+
+        clearTimeout(timeoutId);
 
         if(!res.ok){
-          showErr(`Audit failed (HTTP ${res.status})`);
+          let detail = `HTTP ${res.status}`;
+          try { const j = await res.clone().json(); detail = j.error || j.details || detail; } catch(_){}
+          showErr(`Audit failed: ${detail}`);
           btn.disabled = false;
           return;
         }
@@ -457,7 +515,12 @@
 
         showOk("Done. Your PDF download should have started.");
       }catch(e){
-        showErr("Could not reach the backend.");
+        clearTimeout(timeoutId);
+        if (e.name === "AbortError") {
+          showErr("Request timed out. The audit is taking too long. Please try again.");
+        } else {
+          showErr("Could not reach the backend. Check your network connection.");
+        }
       }finally{
         btn.disabled = false;
         accessTokenEl.value = "";
@@ -565,6 +628,9 @@
     const buttons = Array.from(document.querySelectorAll('.mini-btn[data-item]'));
     buttons.forEach(b => b.disabled = true);
 
+    const lookupCtrl = new AbortController();
+    const lookupTimeout = setTimeout(() => lookupCtrl.abort(), LOOKUP_TIMEOUT_MS);
+
     try {
       const resp = await fetch(BACKEND + "/lookup", {
         method: "POST",
@@ -573,7 +639,8 @@
           environment,
           access_token: accessToken,
           item
-        })
+        }),
+        signal: lookupCtrl.signal,
       });
 
       const json = await resp.json().catch(() => ({}));
@@ -629,8 +696,14 @@
 
       idResults.style.display = "block";
     } catch (err) {
-      showIdError("Lookup failed. Check backend URL and network connection.");
+      clearTimeout(lookupTimeout);
+      if (err.name === "AbortError") {
+        showIdError("Lookup timed out. Please try again.");
+      } else {
+        showIdError("Lookup failed. Check backend URL and network connection.");
+      }
     } finally {
+      clearTimeout(lookupTimeout);
       buttons.forEach(b => b.disabled = false);
     }
   }
