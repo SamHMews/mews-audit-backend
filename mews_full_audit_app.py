@@ -1261,8 +1261,20 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str, include_
     sections: List[Tuple[str, List[CheckItem]]] = []
 
     legal_items: List[CheckItem] = []
-    tz = (cfg.get("Enterprise") or {}).get("TimeZone") if isinstance(cfg, dict) else None
-    currency = (cfg.get("Enterprise") or {}).get("DefaultCurrency") if isinstance(cfg, dict) else None
+    # Configuration/Get returns key enterprise-level baselines under cfg["Enterprise"] (e.g. TimeZoneIdentifier, Currencies).
+    tz = ent.get("TimeZoneIdentifier") or ent.get("TimeZone")
+
+    # Default currency lives inside Enterprise.Currencies[] where IsDefault == true.
+    currency = None
+    cur_list = ent.get("Currencies")
+    if isinstance(cur_list, list):
+        for c in cur_list:
+            if isinstance(c, dict) and c.get("IsDefault") is True:
+                currency = c.get("Currency")
+                break
+    if not currency:
+        # Fallbacks for older payload shapes
+        currency = ent.get("DefaultCurrency") or ent.get("Currency")
 
     st_tax, err_tax = status_for(["tax_environments_getall", "taxations_getall"], "PASS" if (tax_envs or taxations) else "WARN")
     summary = f"TaxEnvironments={len(tax_envs)}, Taxations={len(taxations)}"
@@ -2237,7 +2249,7 @@ def audit():
 
                     "details": "Common causes: (1) Demo vs Production token mismatch, (2) missing Render env vars DEMO/PRODUCTION, (3) wrong API base for Production. Ensure the access token and client token are from the same environment.",
 
-                    "environment": environment,
+                    "environment": env,
 
                     "api_base": base_url,
 
