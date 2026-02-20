@@ -108,13 +108,39 @@
 
     /* ── Card — black box with curved left indentation ── */
     .card {
+      position: relative;
       background: var(--card);
       border: 1px solid var(--border);
-      border-left: 10px solid var(--pink);
-      border-radius: 80px 14px 14px 80px;
-      padding: 32px 42px 32px 52px;
+      border-radius: 14px;
+      padding: 32px 42px 32px 62px;
       margin-bottom: 24px;
+      margin-left: 100px;
       color: var(--text-light);
+    }
+
+    /* Organic curved white shape on the left */
+    .card::before {
+      content: '';
+      position: absolute;
+      left: -100px;
+      top: -1px;
+      bottom: -1px;
+      width: 100px;
+      background: #FFFFFF;
+      border-radius: 0 60% 60% 0 / 0 50% 50% 0;
+    }
+
+    /* Pink accent line */
+    .card::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 38%;
+      width: 3px;
+      height: 24%;
+      background: var(--pink);
+      border-radius: 2px;
+      z-index: 1;
     }
 
     .card-title {
