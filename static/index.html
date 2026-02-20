@@ -420,6 +420,20 @@
     }
 
     .payload-actions { display: flex; gap: 10px; margin-top: 10px; }
+
+    /* Loading spinner */
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(16,185,129,0.28);
+      border-top-color: #6ee7b7;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      vertical-align: middle;
+      margin-right: 8px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 
@@ -524,6 +538,8 @@
 
   <script>
     const BACKEND = "https://mews-audit-backend.onrender.com";
+    const AUDIT_TIMEOUT_MS = 120000; // 2 minutes for PDF generation
+    const LOOKUP_TIMEOUT_MS = 30000; // 30 seconds for ID lookups
 
     // ── Pill toggle helper ────────────────────────────────────────────
     function initEnvToggle(toggleId, onChange) {
@@ -572,7 +588,12 @@
       if (!accessToken) { showErr("Please enter an access token."); return; }
 
       btn.disabled = true;
-      showOk("Generating audit…");
+      okBox.innerHTML = '<span class="spinner"></span> Generating audit&hellip; This may take up to a minute.';
+      okBox.style.display = "block";
+      errBox.style.display = "none";
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), AUDIT_TIMEOUT_MS);
 
       try {
         const form = new FormData();
@@ -581,9 +602,17 @@
         form.append("include_inactive",  includeInact ? "true" : "false");
         form.append("client",            "mews-audit");
 
-        const res = await fetch(`${BACKEND}/audit`, { method: "POST", body: form });
+        const res = await fetch(`${BACKEND}/audit`, { method: "POST", body: form, signal: controller.signal });
 
-        if (!res.ok) { showErr(`Audit failed (HTTP ${res.status})`); return; }
+        clearTimeout(timeoutId);
+
+        if (!res.ok) {
+          let detail = `HTTP ${res.status}`;
+          try { const j = await res.clone().json(); detail = j.error || j.details || detail; } catch(_){}
+          showErr(`Audit failed: ${detail}`);
+          btn.disabled = false;
+          return;
+        }
 
         const blob = await res.blob();
         const url  = URL.createObjectURL(blob);
@@ -592,7 +621,12 @@
         URL.revokeObjectURL(url);
         showOk("Done. Your PDF download should have started.");
       } catch (e) {
-        showErr("Could not reach the backend.");
+        clearTimeout(timeoutId);
+        if (e.name === "AbortError") {
+          showErr("Request timed out. The audit is taking too long. Please try again.");
+        } else {
+          showErr("Could not reach the backend. Check your network connection.");
+        }
       } finally {
         btn.disabled = false;
         accessTokenEl.value = "";
