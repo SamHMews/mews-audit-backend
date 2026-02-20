@@ -90,7 +90,7 @@
     .page-title {
       font-size: clamp(32px, 4.5vw, 48px);
       font-weight: 900;
-      letter-spacing: -0.04em;
+      letter-spacing: 0.02em;
       text-align: center;
       margin: 0 0 14px;
       line-height: 1.05;
@@ -119,14 +119,12 @@
       overflow: hidden;
     }
 
-    /* SVG locks to natural aspect ratio — notch stays at fixed px from top */
+    /* SVG background with exact Figma curve */
     .card-svg-bg {
       position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
+      inset: 0;
       width: 100%;
-      height: auto;
+      height: 100%;
       z-index: -1;
     }
 
@@ -135,7 +133,7 @@
       font-weight: 600;
       letter-spacing: -0.015em;
       margin: 0 0 4px;
-      padding-top: 28px;
+      padding-top: 30px;
       color: var(--text-light);
       text-transform: uppercase;
       display: flex;
@@ -485,6 +483,7 @@
       <div class="form-group">
         <label for="idAccessToken">Access token</label>
         <input id="idAccessToken" type="password" autocomplete="off" placeholder="AccessToken">
+        <div class="hint" id="idAccessTokenHint">Connector API access token</div>
       </div>
 
       <div class="divider"></div>
@@ -602,7 +601,17 @@
     });
 
     // ── ID Helper ────────────────────────────────────────────────────
-    const idEnvEl         = initEnvToggle("idEnvToggle");
+    const idAccessTokenHintEl = document.getElementById("idAccessTokenHint");
+
+    function updateIdHint(env) {
+      if (!idAccessTokenHintEl) return;
+      idAccessTokenHintEl.textContent = (env || idEnvEl.value) === "demo"
+        ? "Are you ready to integrate with Mews?"
+        : "To be confirmed";
+    }
+
+    const idEnvEl = initEnvToggle("idEnvToggle", updateIdHint);
+    updateIdHint();
     const idAccessTokenEl = document.getElementById("idAccessToken");
     const idError         = document.getElementById("idError");
     const idResults       = document.getElementById("idResults");
