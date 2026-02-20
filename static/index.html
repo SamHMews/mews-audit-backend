@@ -127,21 +127,17 @@
       z-index: -1;
     }
 
-    /* When card has expanded content - fix SVG and add solid background */
-    .card.has-expanded-content .card-svg-bg {
-      height: 230px;
-      bottom: auto;
+    /* Background extension for expanded content */
+    .card-bg-extension {
+      display: none;
+      background: #2D2C37;
+      margin-top: 0;
+      margin-bottom: 24px;
+      padding: 0 65px 70px 65px;
     }
 
-    .card.has-expanded-content::after {
-      content: '';
-      position: absolute;
-      top: 230px;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: #2D2C37;
-      z-index: -1;
+    .card-bg-extension.visible {
+      display: block;
     }
 
     .card-title {
@@ -551,6 +547,9 @@
       </div>
     </div>
 
+    <!-- Background extension for expanded ID Helper content -->
+    <div class="card-bg-extension" id="idHelperBgExtension"></div>
+
   </div><!-- /container -->
 
   <script>
@@ -673,6 +672,9 @@
 
     const payloadLines = [];
 
+    // Store original parent for restoring elements
+    const originalParent = idResults.parentElement;
+
     function showIdError(msg) {
       idError.textContent  = msg || "";
       idError.style.display = msg ? "block" : "none";
@@ -750,12 +752,20 @@
     async function runLookup(item) {
       const environment = idEnvEl.value;
       const accessToken = idAccessTokenEl.value.trim();
-      const idHelperCard = document.getElementById("idHelperCard");
+      const bgExtension = document.getElementById("idHelperBgExtension");
 
       showIdError("");
       idResults.style.display  = "none";
       idTbody.innerHTML        = "";
-      if (idHelperCard) idHelperCard.classList.remove("has-expanded-content");
+
+      // Move elements back to original parent and hide extension
+      if (bgExtension && originalParent) {
+        bgExtension.classList.remove("visible");
+        if (idResults.parentElement === bgExtension) {
+          originalParent.appendChild(idResults);
+          originalParent.appendChild(payloadSection);
+        }
+      }
 
       if (!accessToken) { showIdError("Missing access token"); return; }
 
@@ -807,8 +817,13 @@
           idTbody.appendChild(tr);
         });
 
+        // Move results to extension div
+        if (bgExtension) {
+          bgExtension.appendChild(idResults);
+          bgExtension.appendChild(payloadSection);
+          bgExtension.classList.add("visible");
+        }
         idResults.style.display = "block";
-        if (idHelperCard) idHelperCard.classList.add("has-expanded-content");
       } catch (err) {
         showIdError("Lookup failed. Check backend URL and network.");
       } finally {
