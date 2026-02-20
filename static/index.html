@@ -109,11 +109,11 @@
     /* ── Card — SVG-based curved shape ── */
     .card {
       position: relative;
-      padding: 32px 42px;
+      padding: 48px 42px;
       margin-bottom: 24px;
       color: var(--text-light);
       isolation: isolate;
-      border-radius: 14px;
+      border-radius: 0;
       overflow: hidden;
     }
 
@@ -130,24 +130,13 @@
       vector-effect: non-scaling-stroke;
     }
 
-    /* Pink accent line on the curved edge */
-    .card-accent {
-      position: absolute;
-      left: 0;
-      top: 7%;
-      width: 3px;
-      height: 9%;
-      background: var(--pink);
-      border-radius: 2px;
-      z-index: 1;
-    }
-
     .card-title {
       font-size: 17px;
       font-weight: 600;
       letter-spacing: -0.015em;
       margin: 0 0 4px;
       color: var(--text-light);
+      text-transform: uppercase;
     }
 
     .card-desc {
@@ -402,7 +391,6 @@
       <svg class="card-svg-bg" viewBox="0 0 1282 764" fill="none" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
         <path d="M1282 0V764H0V95.2891C0 81.8402 23.1597 70.4815 54.708 66.9375L64.5557 65.665C67.5646 65.3015 69.0234 63.0296 69.0234 60.667C69.0233 58.3953 67.4733 56.0324 64.5557 55.6689L54.708 54.3975C23.1599 50.8535 0.000321887 39.4946 0 26.0459V0H1282Z" fill="#2D2C37"/>
       </svg>
-      <div class="card-accent"></div>
       <h2 class="card-title">Audit Generator</h2>
       <p class="card-desc">Run a full configuration audit and download a PDF report.</p>
 
@@ -439,7 +427,6 @@
       <svg class="card-svg-bg" viewBox="0 0 1282 764" fill="none" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
         <path d="M1282 0V764H0V95.2891C0 81.8402 23.1597 70.4815 54.708 66.9375L64.5557 65.665C67.5646 65.3015 69.0234 63.0296 69.0234 60.667C69.0233 58.3953 67.4733 56.0324 64.5557 55.6689L54.708 54.3975C23.1599 50.8535 0.000321887 39.4946 0 26.0459V0H1282Z" fill="#2D2C37"/>
       </svg>
-      <div class="card-accent"></div>
       <h2 class="card-title">ID Helper</h2>
       <p class="card-desc">Fetch IDs for common objects and build a JSON snippet for API calls.</p>
 
