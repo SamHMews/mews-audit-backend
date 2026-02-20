@@ -110,6 +110,7 @@
     /* ── Card — SVG-based curved shape ── */
     .card {
       position: relative;
+      background: #2D2C37;
       padding: 0 42px 48px 42px;
       margin-bottom: 24px;
       color: var(--text-light);
@@ -118,17 +119,15 @@
       overflow: hidden;
     }
 
-    /* SVG background with exact Figma curve */
+    /* SVG locks to natural aspect ratio — notch stays at fixed px from top */
     .card-svg-bg {
       position: absolute;
-      inset: 0;
+      top: 0;
+      left: 0;
+      right: 0;
       width: 100%;
-      height: 100%;
+      height: auto;
       z-index: -1;
-    }
-
-    .card-svg-bg path {
-      vector-effect: non-scaling-stroke;
     }
 
     .card-title {
@@ -136,7 +135,7 @@
       font-weight: 600;
       letter-spacing: -0.015em;
       margin: 0 0 4px;
-      padding-top: 56px;
+      padding-top: 28px;
       color: var(--text-light);
       text-transform: uppercase;
       display: flex;
@@ -181,7 +180,7 @@
       margin-bottom: 7px;
     }
 
-    input, select {
+    input {
       width: 100%;
       background: rgba(255,255,255,0.02);
       border: 1px solid rgba(255,255,255,0.06);
@@ -193,33 +192,51 @@
       transition: all 0.2s ease;
     }
 
-    select {
-      cursor: pointer;
-      appearance: none;
-      background-image: url("data:image/svg+xml,%3Csvg width='12' height='8' viewBox='0 0 12 8' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1.5L6 6.5L11 1.5' stroke='%23F7BCF1' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-      background-repeat: no-repeat;
-      background-position: right 14px center;
-      padding-right: 40px;
-    }
-
-    select:hover {
-      background-color: rgba(255,255,255,0.04);
-      border-color: rgba(247,188,241,0.2);
-    }
-
     input::placeholder { color: rgba(255,255,255,0.25); }
 
-    input:focus, select:focus {
+    input:focus {
       outline: none;
       background-color: rgba(255,255,255,0.05);
       border-color: var(--pink);
       box-shadow: 0 0 0 3px rgba(247,188,241,0.08);
     }
 
-    select option {
-      background: #1a1b22;
-      color: var(--text-light);
-      padding: 8px 12px;
+    /* ── Environment pill toggle ── */
+    .env-toggle {
+      display: flex;
+      gap: 0;
+      background: rgba(0,0,0,0.25);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 8px;
+      padding: 3px;
+      margin-bottom: 20px;
+    }
+
+    .env-btn {
+      flex: 1;
+      padding: 9px 14px;
+      background: transparent;
+      border: none;
+      border-radius: 5px;
+      color: rgba(255,255,255,0.38);
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: all 0.18s ease;
+    }
+
+    .env-btn.active {
+      background: rgba(247,188,241,0.13);
+      color: var(--pink);
+      font-weight: 700;
+    }
+
+    .env-btn:hover:not(.active) {
+      color: rgba(255,255,255,0.6);
+      background: rgba(255,255,255,0.04);
     }
 
     .hint {
@@ -421,7 +438,7 @@
 
     <!-- ── Audit Generator ── -->
     <div class="card">
-      <svg class="card-svg-bg" viewBox="0 0 1282 764" fill="none" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+      <svg class="card-svg-bg" viewBox="0 0 1282 764" fill="none" xmlns="http://www.w3.org/2000/svg">
         <path d="M1282 0V764H0V95.2891C0 81.8402 23.1597 70.4815 54.708 66.9375L64.5557 65.665C67.5646 65.3015 69.0234 63.0296 69.0234 60.667C69.0233 58.3953 67.4733 56.0324 64.5557 55.6689L54.708 54.3975C23.1599 50.8535 0.000321887 39.4946 0 26.0459V0H1282Z" fill="#2D2C37"/>
       </svg>
       <h2 class="card-title">Audit Generator</h2>
@@ -430,12 +447,9 @@
       <div id="msgOk" class="msg ok"></div>
       <div id="msgErr" class="msg err"></div>
 
-      <div class="form-group">
-        <label for="environment">Environment</label>
-        <select id="environment">
-          <option value="product">Production</option>
-          <option value="demo" selected>Demo</option>
-        </select>
+      <div class="env-toggle" id="envToggle">
+        <button class="env-btn active" data-env="demo"    type="button">Demo</button>
+        <button class="env-btn"        data-env="product" type="button">Production</button>
       </div>
 
       <div class="form-group">
@@ -457,18 +471,15 @@
 
     <!-- ── ID Helper ── -->
     <div class="card">
-      <svg class="card-svg-bg" viewBox="0 0 1282 764" fill="none" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+      <svg class="card-svg-bg" viewBox="0 0 1282 764" fill="none" xmlns="http://www.w3.org/2000/svg">
         <path d="M1282 0V764H0V95.2891C0 81.8402 23.1597 70.4815 54.708 66.9375L64.5557 65.665C67.5646 65.3015 69.0234 63.0296 69.0234 60.667C69.0233 58.3953 67.4733 56.0324 64.5557 55.6689L54.708 54.3975C23.1599 50.8535 0.000321887 39.4946 0 26.0459V0H1282Z" fill="#2D2C37"/>
       </svg>
       <h2 class="card-title">ID Helper</h2>
       <p class="card-desc">Fetch IDs for common objects and build a JSON snippet for API calls.</p>
 
-      <div class="form-group">
-        <label for="idEnvironment">Environment</label>
-        <select id="idEnvironment">
-          <option value="product">Production</option>
-          <option value="demo" selected>Demo</option>
-        </select>
+      <div class="env-toggle" id="idEnvToggle">
+        <button class="env-btn active" data-env="demo"    type="button">Demo</button>
+        <button class="env-btn"        data-env="product" type="button">Production</button>
       </div>
 
       <div class="form-group">
@@ -516,24 +527,37 @@
   <script>
     const BACKEND = "https://mews-audit-backend.onrender.com";
 
+    // ── Pill toggle helper ────────────────────────────────────────────
+    function initEnvToggle(toggleId, onChange) {
+      const wrap = document.getElementById(toggleId);
+      wrap.querySelectorAll(".env-btn").forEach(b => {
+        b.addEventListener("click", () => {
+          wrap.querySelectorAll(".env-btn").forEach(x => x.classList.remove("active"));
+          b.classList.add("active");
+          if (onChange) onChange(b.dataset.env);
+        });
+      });
+      return { get value() { return wrap.querySelector(".env-btn.active").dataset.env; } };
+    }
+
     // ── Audit Generator ──────────────────────────────────────────────
     const okBox  = document.getElementById("msgOk");
     const errBox = document.getElementById("msgErr");
     const btn    = document.getElementById("btn");
 
-    const envEl             = document.getElementById("environment");
     const accessTokenEl     = document.getElementById("accessToken");
     const includeInactiveEl = document.getElementById("includeInactive");
     const accessTokenHintEl = document.getElementById("accessTokenHint");
 
-    function updateHint() {
+    function updateHint(env) {
       if (!accessTokenHintEl) return;
-      accessTokenHintEl.textContent = envEl.value === "demo"
+      accessTokenHintEl.textContent = (env || envEl.value) === "demo"
         ? "Are you ready to integrate with Mews?"
         : "To be confirmed";
     }
+
+    const envEl = initEnvToggle("envToggle", updateHint);
     updateHint();
-    envEl.addEventListener("change", updateHint);
 
     function showOk(t)  { okBox.textContent = t;  okBox.style.display  = "block"; errBox.style.display = "none"; }
     function showErr(t) { errBox.textContent = t; errBox.style.display = "block"; okBox.style.display  = "none"; }
@@ -578,7 +602,7 @@
     });
 
     // ── ID Helper ────────────────────────────────────────────────────
-    const idEnvEl         = document.getElementById("idEnvironment");
+    const idEnvEl         = initEnvToggle("idEnvToggle");
     const idAccessTokenEl = document.getElementById("idAccessToken");
     const idError         = document.getElementById("idError");
     const idResults       = document.getElementById("idResults");
