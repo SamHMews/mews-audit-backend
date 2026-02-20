@@ -128,13 +128,20 @@
     }
 
     /* When card has expanded content - fix SVG and add solid background */
-    .card.has-expanded-content {
-      background: #2D2C37;
-    }
-
     .card.has-expanded-content .card-svg-bg {
       height: 230px;
       bottom: auto;
+    }
+
+    .card.has-expanded-content::after {
+      content: '';
+      position: absolute;
+      top: 230px;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: #2D2C37;
+      z-index: -1;
     }
 
     .card-title {
