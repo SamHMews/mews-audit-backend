@@ -94,12 +94,13 @@
       text-align: center;
       margin: 0 0 14px;
       line-height: 1.05;
-      color: var(--text-dark);
+      color: #2D2C37;
     }
 
     .page-subtitle {
       text-align: center;
-      color: var(--muted-dark);
+      color: #2D2C37;
+      opacity: 0.65;
       font-size: 15px;
       line-height: 1.6;
       margin: 0 auto 52px;
@@ -137,6 +138,18 @@
       margin: 0 0 4px;
       color: var(--text-light);
       text-transform: uppercase;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .card-title::before {
+      content: '';
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--pink);
+      flex-shrink: 0;
     }
 
     .card-desc {
@@ -383,7 +396,7 @@
       <img class="logo" src="https://www.mews.com/hubfs/_Project_Phoenix/images/logo/Mews%20Logo.svg" alt="Mews">
     </header>
 
-    <h1 class="page-title">Mews Configuration Audit</h1>
+    <h1 class="page-title">THE TAM CONCIERGE</h1>
     <p class="page-subtitle">Generate a detailed PDF audit from your Mews configuration using the Connector API.</p>
 
     <!-- ── Audit Generator ── -->
