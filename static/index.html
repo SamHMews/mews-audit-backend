@@ -4,155 +4,192 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Mews Audit</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='11' cy='11' r='7' stroke='%231C1D24' stroke-width='2' fill='none'/%3E%3Cline x1='16.65' y1='16.65' x2='21' y2='21' stroke='%231C1D24' stroke-width='2'/%3E%3C/svg%3E">
-
-  <!-- Fonts -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='11' cy='11' r='7' stroke='%23F7BCF1' stroke-width='2' fill='none'/%3E%3Cline x1='16.65' y1='16.65' x2='21' y2='21' stroke='%23F7BCF1' stroke-width='2'/%3E%3C/svg%3E">
 
   <style>
-    :root{
-      --text:#1C1D24;
-      --bg:#FFFFFF;
-      --cta:#F7BCF1;
-      --border:#D7D9E3;
-      --border-strong:#B7BBCB;
-      --radius:12px;
-      --shadow: 0 12px 32px rgba(28,29,36,.10);
-      --shadow-sm: 0 6px 18px rgba(28,29,36,.08);
-      --focus: 0 0 0 4px rgba(247,188,241,.55);
-      --max: 920px;
+    /* ── Soehne (Mews brand font) ── */
+    @font-face {
+      font-family: 'soehne';
+      src: url('https://www.mews.com/_next/static/media/a7138a7c84a7c9c8-s.p.woff2') format('woff2');
+      font-weight: 400;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: 'soehne';
+      src: url('https://www.mews.com/_next/static/media/51430fbd011a6b32-s.p.woff2') format('woff2');
+      font-weight: 500;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: 'soehne';
+      src: url('https://www.mews.com/_next/static/media/cfc03fda8c661881-s.p.woff2') format('woff2');
+      font-weight: 600;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: 'soehne';
+      src: url('https://www.mews.com/_next/static/media/5c87b723bfb7895f-s.p.woff2') format('woff2');
+      font-weight: 700;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: 'soehne Fallback';
+      src: local('Arial');
+      ascent-override: 116.77%;
+      descent-override: 42.18%;
+      line-gap-override: 0%;
+      size-adjust: 100.28%;
     }
 
-    *{ box-sizing:border-box; }
-    body{
-      margin:0;
-      background:var(--bg);
-      color:var(--text);
-      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    /* ── Tokens ── */
+    :root {
+      --black:       #0D0E12;
+      --card:        #111115;
+      --pink:        #F7BCF1;
+      --text:        #FFFFFF;
+      --muted:       rgba(255,255,255,0.50);
+      --border:      rgba(255,255,255,0.09);
+      --input-bg:    rgba(255,255,255,0.04);
+      --radius:      14px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--black);
+      color: var(--text);
+      font-family: 'soehne', 'soehne Fallback', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
       -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
     }
 
-    .container{
-      max-width:var(--max);
-      margin:0 auto;
-      padding:48px 24px;
+    /* ── Layout ── */
+    .container {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 64px 24px 80px;
     }
 
-    header{
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      margin-bottom:36px;
+    header {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 52px;
     }
 
-    .logo{
-      width:220px;
-      max-width:60vw;
-      height:auto;
-      display:block;
+    .logo { width: 110px; height: auto; display: block; }
+
+    .page-title {
+      font-size: clamp(26px, 3.8vw, 38px);
+      font-weight: 600;
+      letter-spacing: -0.025em;
+      text-align: center;
+      margin: 0 0 14px;
+      line-height: 1.15;
     }
 
-    h1{
-      font-family:Manrope, Inter, sans-serif;
-      font-size:clamp(24px,3.2vw,34px);
-      font-weight:600;
-      margin:0 0 12px 0;
-      text-align:center;
+    .page-subtitle {
+      text-align: center;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.6;
+      margin: 0 auto 52px;
+      max-width: 48ch;
     }
 
-    .subtitle{
-      max-width:70ch;
-      font-size:14px;
-      opacity:.78;
-      line-height:1.55;
-      text-align:center;
-      margin:0 auto 22px auto;
+    /* ── Card — black box with pink left accent ── */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--pink);
+      border-radius: 0 var(--radius) var(--radius) 0;
+      padding: 32px 32px 32px 36px;
+      margin-bottom: 24px;
     }
 
-    .card{
-      border:1px solid var(--border);
-      border-radius:var(--radius);
-      box-shadow:var(--shadow);
-      padding:32px;
-      background:#fff;
-      max-width:720px;
-      margin:0 auto;
+    .card-title {
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+      margin: 0 0 4px;
     }
 
-    .row{
-      display:grid;
-      grid-template-columns:1fr 1fr;
-      gap:16px;
+    .card-desc {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+      margin: 0 0 26px;
     }
 
-    @media(max-width:720px){
-      .row{ grid-template-columns:1fr; }
-      .logo{ width:200px; }
+    /* ── Grid ── */
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    @media (max-width: 560px) { .row { grid-template-columns: 1fr; } }
+
+    /* ── Fields ── */
+    .form-group { margin-bottom: 14px; }
+
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 7px;
     }
 
-    label{
-      font-size:13px;
-      font-weight:600;
-      margin-bottom:6px;
-      display:block;
+    input, select {
+      width: 100%;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 11px 14px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 14px;
+      transition: border-color 0.15s, box-shadow 0.15s;
     }
 
-    input, select{
-      width:100%;
-      padding:12px;
-      border-radius:10px;
-      border:1px solid var(--border);
-      font-size:14px;
-      background:#fff;
+    input::placeholder { color: rgba(255,255,255,0.25); }
+
+    input:focus, select:focus {
+      outline: none;
+      border-color: var(--pink);
+      box-shadow: 0 0 0 3px rgba(247,188,241,0.14);
     }
 
-    input:focus, select:focus{
-      outline:none;
-      border-color:var(--border-strong);
-      box-shadow:var(--focus);
+    select option { background: #1a1b22; color: var(--text); }
+
+    .hint {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 5px;
     }
 
-    .hint{
-      font-size:12.5px;
-      opacity:.7;
-      margin-top:6px;
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 24px 0;
     }
 
-    .msg{
-      display:none;
-      margin:0 auto 18px auto;
-      max-width:720px;
-      padding:12px 14px;
-      border-radius:12px;
-      font-size:13.5px;
+    /* ── Toggle ── */
+    .toggleRow {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin: 20px 0;
     }
 
-    .msg.ok{
-      background:rgba(16,185,129,.08);
-      border:1px solid rgba(16,185,129,.35);
+    .toggleText {
+      font-size: 13.5px;
+      color: rgba(255,255,255,0.8);
+      margin: 0;
     }
 
-    .msg.err{
-      background:rgba(239,68,68,.08);
-      border:1px solid rgba(239,68,68,.35);
-    }
-
-    .toggleRow{
-      display:flex;
-      align-items:center;
-      gap:14px;
-      margin-top:18px;
-    }
-
-    .toggleText{
-      font-size:13px;
-      font-weight:600;
-      margin:0;
-    }
-
-    /* Pink Toggle (exact implementation provided) */
     .toggle-container {
       position: relative;
       width: 52px;
@@ -168,7 +205,7 @@
       z-index: 2;
       opacity: 0;
       cursor: pointer;
-      margin:0;
+      margin: 0;
     }
 
     .toggle-track {
@@ -178,13 +215,13 @@
       width: 100%;
       height: 100%;
       border-radius: inherit;
-      background-color: #aeaeae;
-      box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.2);
-      transition: background-color 0.3s ease;
+      background: rgba(255,255,255,0.14);
+      box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.3);
+      transition: background-color 0.28s ease;
     }
 
     .toggle-container > .toggle-checkbox:checked + .toggle-track {
-      background-color: #F7BCF1;
+      background-color: var(--pink);
     }
 
     .toggle-thumb {
@@ -192,466 +229,467 @@
       height: 22px;
       border-radius: 50%;
       background: #fff;
-      box-shadow:
-        0 4px 4px rgb(0 0 0 / 0.2),
-        inset 0 -2px 4px rgb(0 0 0 / 0.2);
-      transition: transform 0.25s ease;
+      box-shadow: 0 4px 4px rgb(0 0 0 / 0.22), inset 0 -2px 4px rgb(0 0 0 / 0.15);
+      transition: transform 0.24s ease;
     }
 
     .toggle-checkbox:checked + .toggle-track > .toggle-thumb {
       transform: translateX(22px);
     }
 
-    .actions{
-      display:flex;
-      justify-content:flex-start;
-      align-items:center;
-      gap:16px;
-      margin-top:24px;
-      flex-wrap:wrap;
+    /* ── Buttons ── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--pink);
+      color: #0D0E12;
+      border: none;
+      border-radius: 999px;
+      padding: 13px 22px;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.15s;
+    }
+    .btn:hover { opacity: 0.88; transform: translateY(-1px); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+    .mini-btn {
+      background: rgba(247,188,241,0.10);
+      color: var(--pink);
+      border: 1px solid rgba(247,188,241,0.18);
+      border-radius: 999px;
+      padding: 8px 15px;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .mini-btn:hover { background: rgba(247,188,241,0.18); }
+    .mini-btn:disabled { opacity: 0.38; cursor: not-allowed; }
+
+    .tiny {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .tiny.primary {
+      background: rgba(247,188,241,0.10);
+      border-color: rgba(247,188,241,0.22);
+      color: var(--pink);
+      font-weight: 700;
+    }
+    .tiny:hover { background: rgba(255,255,255,0.09); }
+    .tiny.primary:hover { background: rgba(247,188,241,0.18); }
+
+    /* ── Status messages ── */
+    .msg {
+      display: none;
+      padding: 11px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-bottom: 18px;
+    }
+    .msg.ok  { background: rgba(16,185,129,0.09); border: 1px solid rgba(16,185,129,0.28); color: #6ee7b7; }
+    .msg.err { background: rgba(239,68,68,0.09);  border: 1px solid rgba(239,68,68,0.28);  color: #fca5a5; }
+
+    /* ── ID Helper ── */
+    .btn-row { display: flex; flex-wrap: wrap; gap: 10px; }
+
+    .id-error {
+      display: none;
+      color: #fca5a5;
+      font-size: 12px;
+      margin-top: 10px;
     }
 
-    .btn{
-      font-family:Manrope, Inter, sans-serif;
-      font-weight:700;
-      background:var(--cta);
-      color:var(--text);
-      border-radius:999px;
-      border:1px solid rgba(28,29,36,.2);
-      padding:12px 18px;
-      cursor:pointer;
-      box-shadow:var(--shadow-sm);
+    table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+    th, td {
+      padding: 10px 8px;
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      vertical-align: middle;
+    }
+    th { color: var(--muted); font-weight: 600; }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11px;
+      background: rgba(255,255,255,0.06);
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: rgba(255,255,255,0.85);
     }
 
-    .btn:hover{ transform:translateY(-1px); }
-    .btn:disabled{ opacity:.65; cursor:not-allowed; transform:none; }
-  
-/* ===== ID helper + payload builder ===== */
-.idhelper { margin-top: 18px; text-align: left; }
-.idhelper h3 { font-size: 14px; margin: 14px 0 6px; }
-.idhelper .help { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
-.idhelper .btn-row { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
-.idhelper .mini-btn {
-  background: var(--cta);
-  border: 1px solid rgba(0,0,0,0.04);
-  color: #1c1d24;
-  padding: 8px 12px;
-  border-radius: 999px;
-  font-weight: 600;
-  font-size: 12px;
-  cursor: pointer;
-  box-shadow: 0 6px 14px rgba(0,0,0,0.08);
-}
-.idhelper .mini-btn:hover { filter: brightness(0.98); }
-.idhelper .mini-btn:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
+    .row-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
 
-.idhelper .error { color: #b00020; font-size: 12px; margin-top: 6px; }
+    .payload-box {
+      background: rgba(0,0,0,0.45);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+      min-height: 100px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      color: rgba(255,255,255,0.70);
+      white-space: pre;
+      overflow: auto;
+      margin-top: 14px;
+    }
 
-.idhelper table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-.idhelper th, .idhelper td {
-  padding: 10px 8px;
-  border-top: 1px solid var(--border);
-  vertical-align: middle;
-  font-size: 12px;
-}
-.idhelper th { color: var(--muted); font-weight: 700; text-transform: none; }
-.idhelper code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 11px; }
-
-.idhelper .row-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
-.idhelper .tiny {
-  background: #fff;
-  border: 1px solid var(--border);
-  padding: 6px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-  cursor: pointer;
-}
-.idhelper .tiny.primary { background: var(--cta); border-color: rgba(0,0,0,0.04); font-weight: 700; }
-.idhelper .tiny:hover { filter: brightness(0.98); }
-
-.payload { margin-top: 14px; }
-.payload .box {
-  background: #0f1117;
-  color: #d7dde8;
-  border-radius: 12px;
-  padding: 12px;
-  min-height: 120px;
-  white-space: pre;
-  overflow: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  font-size: 12px;
-  line-height: 1.4;
-  border: 1px solid rgba(255,255,255,0.08);
-}
-.payload .payload-actions { display: flex; gap: 10px; margin-top: 10px; }
-
-</style>
+    .payload-actions { display: flex; gap: 10px; margin-top: 10px; }
+  </style>
 </head>
 
 <body>
   <div class="container">
+
     <header>
-      <img class="logo" src="https://www.mews.com/hubfs/_Project_Phoenix/images/logo/Mews%20Logo.svg" alt="Mews">
+      <img class="logo" src="https://www.mews.com/hubfs/_Project_Phoenix/images/logo/Mews%20Logo%20-%20White.svg"
+           onerror="this.src='https://www.mews.com/hubfs/_Project_Phoenix/images/logo/Mews%20Logo.svg'"
+           alt="Mews">
     </header>
 
-    <h1>Mews Configuration Audit</h1>
-    <p class="subtitle">
-      Generate a detailed, table-driven PDF audit report from your Mews configuration using the Connector API.
-    </p>
+    <h1 class="page-title">Mews Configuration Audit</h1>
+    <p class="page-subtitle">Generate a detailed PDF audit from your Mews configuration using the Connector API.</p>
 
-    <div id="msgOk" class="msg ok"></div>
-    <div id="msgErr" class="msg err"></div>
+    <!-- ── Audit Generator ── -->
+    <div class="card">
+      <h2 class="card-title">Audit Generator</h2>
+      <p class="card-desc">Run a full configuration audit and download a PDF report.</p>
 
-    <section class="card">
+      <div id="msgOk" class="msg ok"></div>
+      <div id="msgErr" class="msg err"></div>
+
       <div class="row">
-        <div>
+        <div class="form-group">
           <label for="environment">Environment</label>
           <select id="environment">
             <option value="product">Production</option>
             <option value="demo" selected>Demo</option>
           </select>
-          <div class="hint">Select where the audit should run</div>
         </div>
+        <div class="form-group">
+          <label for="clientToken">Client token</label>
+          <input id="clientToken" type="password" autocomplete="off" placeholder="ClientToken">
+        </div>
+      </div>
 
-        <div>
-          <label for="accessToken">Access token</label>
-          <input id="accessToken" type="password" autocomplete="off">
-          <div class="hint" id="accessTokenHint">Connector API access token</div>
-        </div>
+      <div class="form-group">
+        <label for="accessToken">Access token</label>
+        <input id="accessToken" type="password" autocomplete="off" placeholder="AccessToken">
+        <div class="hint" id="accessTokenHint">Connector API access token</div>
       </div>
 
       <div class="toggleRow">
         <span class="toggleText">Include inactive rates &amp; rate groups</span>
         <div class="toggle-container">
           <input id="includeInactive" class="toggle-checkbox" type="checkbox" checked>
-          <div class="toggle-track">
-            <div class="toggle-thumb"></div>
-          </div>
+          <div class="toggle-track"><div class="toggle-thumb"></div></div>
         </div>
       </div>
 
-      <div class="actions">
-        <button id="btn" class="btn">Generate PDF audit</button>
-      </div>
+      <button id="btn" class="btn">Generate PDF audit</button>
+    </div>
 
-      <!-- ID helper -->
-      <div class="idhelper" id="idHelper">
-        <h3>ID helper</h3>
-        <div class="help">Fetch IDs for common objects and build a JSON snippet you can reuse in API calls.</div>
+    <!-- ── ID Helper ── -->
+    <div class="card">
+      <h2 class="card-title">ID Helper</h2>
+      <p class="card-desc">Fetch IDs for common objects and build a JSON snippet for API calls.</p>
 
-        <div class="btn-row">
-          <button class="mini-btn" data-item="services" type="button">Get Service IDs</button>
-          <button class="mini-btn" data-item="roomcategories" type="button">Get Room Category IDs</button>
-          <button class="mini-btn" data-item="rates" type="button">Get Rate IDs</button>
-          <button class="mini-btn" data-item="products" type="button">Get Product IDs</button>
-          <button class="mini-btn" data-item="accountingcategories" type="button">Get Accounting Category IDs</button>
-          <button class="mini-btn" data-item="agecategories" type="button">Get Age Category IDs</button>
+      <div class="row">
+        <div class="form-group">
+          <label for="idEnvironment">Environment</label>
+          <select id="idEnvironment">
+            <option value="product">Production</option>
+            <option value="demo" selected>Demo</option>
+          </select>
         </div>
-
-        <div class="error" id="idError" style="display:none"></div>
-
-        <div id="idResults" style="display:none">
-          <table>
-            <thead>
-              <tr>
-                <th style="width: 32%">Name</th>
-                <th>ID</th>
-                <th style="width: 24%; text-align:right">Actions</th>
-              </tr>
-            </thead>
-            <tbody id="idTbody"></tbody>
-          </table>
-        </div>
-
-        <div class="payload" id="payloadSection" style="display:none">
-          <h3>JSON Payload Builder</h3>
-          <div class="box" id="payloadBox">// Click "Add" on any ID to build your JSON payload</div>
-          <div class="payload-actions">
-            <button class="mini-btn" id="copyPayload" type="button">Copy payload</button>
-            <button class="tiny" id="clearPayload" type="button">Clear</button>
-          </div>
+        <div class="form-group">
+          <label for="idClientToken">Client token</label>
+          <input id="idClientToken" type="password" autocomplete="off" placeholder="ClientToken">
         </div>
       </div>
 
-    </section>
-  </div>
+      <div class="form-group">
+        <label for="idAccessToken">Access token</label>
+        <input id="idAccessToken" type="password" autocomplete="off" placeholder="AccessToken">
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="btn-row">
+        <button class="mini-btn" data-item="services"               type="button">Service IDs</button>
+        <button class="mini-btn" data-item="roomcategories"         type="button">Room Category IDs</button>
+        <button class="mini-btn" data-item="rates"                  type="button">Rate IDs</button>
+        <button class="mini-btn" data-item="products"               type="button">Product IDs</button>
+        <button class="mini-btn" data-item="accountingcategories"   type="button">Accounting Category IDs</button>
+        <button class="mini-btn" data-item="agecategories"          type="button">Age Category IDs</button>
+      </div>
+
+      <div class="id-error" id="idError"></div>
+
+      <div id="idResults" style="display:none">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:32%">Name</th>
+              <th>ID</th>
+              <th style="width:24%;text-align:right">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="idTbody"></tbody>
+        </table>
+      </div>
+
+      <div id="payloadSection" style="display:none">
+        <div class="payload-box" id="payloadBox">// Click "Add" on any ID to build your JSON payload</div>
+        <div class="payload-actions">
+          <button class="mini-btn" id="copyPayload" type="button">Copy payload</button>
+          <button class="tiny"     id="clearPayload" type="button">Clear</button>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /container -->
 
   <script>
     const BACKEND = "https://mews-audit-backend.onrender.com";
 
-    const okBox = document.getElementById("msgOk");
+    // ── Audit Generator ──────────────────────────────────────────────
+    const okBox  = document.getElementById("msgOk");
     const errBox = document.getElementById("msgErr");
-    const btn = document.getElementById("btn");
+    const btn    = document.getElementById("btn");
 
-    const envEl = document.getElementById("environment");
-    const accessTokenEl = document.getElementById("accessToken");
+    const envEl             = document.getElementById("environment");
+    const clientTokenEl     = document.getElementById("clientToken");
+    const accessTokenEl     = document.getElementById("accessToken");
     const includeInactiveEl = document.getElementById("includeInactive");
-
     const accessTokenHintEl = document.getElementById("accessTokenHint");
 
-    function updateAccessTokenHint(){
-      const env = (envEl && envEl.value) ? envEl.value : "demo";
-      if(!accessTokenHintEl) return;
-      if(env === "demo"){
-        accessTokenHintEl.textContent = "Are you ready to integrate with Mews?";
-      }else{
-        // Production (value is "product" in this UI)
-        accessTokenHintEl.textContent = "To be confirmed";
-      }
+    function updateHint() {
+      if (!accessTokenHintEl) return;
+      accessTokenHintEl.textContent = envEl.value === "demo"
+        ? "Are you ready to integrate with Mews?"
+        : "To be confirmed";
     }
+    updateHint();
+    envEl.addEventListener("change", updateHint);
 
-    updateAccessTokenHint();
-    if(envEl){ envEl.addEventListener("change", updateAccessTokenHint); }
+    function showOk(t)  { okBox.textContent = t;  okBox.style.display  = "block"; errBox.style.display = "none"; }
+    function showErr(t) { errBox.textContent = t; errBox.style.display = "block"; okBox.style.display  = "none"; }
 
-    function showOk(t){
-      okBox.textContent = t;
-      okBox.style.display = "block";
-      errBox.style.display = "none";
-    }
-
-    function showErr(t){
-      errBox.textContent = t;
-      errBox.style.display = "block";
-      okBox.style.display = "none";
-    }
-
-    // Optional: hook for future animation logic (as requested)
-    const checkbox = document.querySelector('.toggle-checkbox');
-    checkbox.addEventListener('click', e => e.target.classList.add('toggled-once'), { once: true });
+    // Pink toggle – small UX: mark as interacted once
+    document.getElementById("includeInactive")
+      .addEventListener("click", e => e.target.classList.add("toggled-once"), { once: true });
 
     btn.addEventListener("click", async () => {
-      const environment = envEl.value;
-      const accessToken = accessTokenEl.value.trim();
-      const includeInactive = includeInactiveEl.checked;
+      const environment   = envEl.value;
+      const clientToken   = clientTokenEl.value.trim();
+      const accessToken   = accessTokenEl.value.trim();
+      const includeInact  = includeInactiveEl.checked;
 
-      if(!accessToken){
-        showErr("Please enter an access token.");
-        return;
-      }
+      if (!accessToken) { showErr("Please enter an access token."); return; }
 
       btn.disabled = true;
       showOk("Generating audit…");
 
-      try{
+      try {
         const form = new FormData();
-        form.append("access_token", accessToken);
-        form.append("environment", environment);
-        form.append("include_inactive", includeInactive ? "true" : "false");
-        form.append("client", "mews-audit");
+        form.append("access_token",      accessToken);
+        form.append("environment",       environment);
+        form.append("include_inactive",  includeInact ? "true" : "false");
+        form.append("client",            "mews-audit");
+        if (clientToken) form.append("client_token", clientToken);
 
-        const res = await fetch(`${BACKEND}/audit`, { method:"POST", body:form });
+        const res = await fetch(`${BACKEND}/audit`, { method: "POST", body: form });
 
-        if(!res.ok){
-          showErr(`Audit failed (HTTP ${res.status})`);
-          btn.disabled = false;
-          return;
-        }
+        if (!res.ok) { showErr(`Audit failed (HTTP ${res.status})`); return; }
 
         const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "mews-audit.pdf";
-        a.click();
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement("a");
+        a.href = url; a.download = "mews-audit.pdf"; a.click();
         URL.revokeObjectURL(url);
-
         showOk("Done. Your PDF download should have started.");
-      }catch(e){
+      } catch (e) {
         showErr("Could not reach the backend.");
-      }finally{
+      } finally {
         btn.disabled = false;
         accessTokenEl.value = "";
       }
     });
-  
-  // ===== ID helper + JSON payload builder =====
-  const idError = document.getElementById("idError");
-  const idResults = document.getElementById("idResults");
-  const idTbody = document.getElementById("idTbody");
-  const payloadSection = document.getElementById("payloadSection");
-  const payloadBox = document.getElementById("payloadBox");
-  const copyPayloadBtn = document.getElementById("copyPayload");
-  const clearPayloadBtn = document.getElementById("clearPayload");
 
-  const payloadLines = [];
+    // ── ID Helper ────────────────────────────────────────────────────
+    const idEnvEl         = document.getElementById("idEnvironment");
+    const idClientTokenEl = document.getElementById("idClientToken");
+    const idAccessTokenEl = document.getElementById("idAccessToken");
+    const idError         = document.getElementById("idError");
+    const idResults       = document.getElementById("idResults");
+    const idTbody         = document.getElementById("idTbody");
+    const payloadSection  = document.getElementById("payloadSection");
+    const payloadBox      = document.getElementById("payloadBox");
+    const copyPayloadBtn  = document.getElementById("copyPayload");
+    const clearPayloadBtn = document.getElementById("clearPayload");
 
-  function showIdError(msg) {
-    if (!idError) return;
-    idError.textContent = msg || "";
-    idError.style.display = msg ? "block" : "none";
-  }
+    const payloadLines = [];
 
-  function getEnvAndToken() {
-    const environment = (document.getElementById("environment")?.value || "demo").toLowerCase();
-    const accessToken = (document.getElementById("accessToken")?.value || "").trim();
-    return { environment, accessToken };
-  }
-
-  function itemToJsonKey(item) {
-    const map = {
-      services: "ServiceId",
-      // "Room categories" in Mews API are Resource Categories
-      roomcategories: "ResourceCategoryId",
-      rates: "RateId",
-      products: "ProductId",
-      accountingcategories: "AccountingCategoryId",
-      agecategories: "AgeCategoryId",
-    };
-    return map[item] || "Id";
-  }
-
-  function renderPayload() {
-    if (!payloadLines.length) {
-      payloadBox.textContent = '// Click "Add" on any ID to build your JSON payload';
-      payloadSection.style.display = "none";
-      return;
-    }
-    payloadSection.style.display = "block";
-    payloadBox.textContent = payloadLines.join("\n");
-  }
-
-  function addPayloadLine(item, id) {
-    const key = itemToJsonKey(item);
-    const line = `"${key}": "${id}",`;
-    payloadLines.push(line);
-    renderPayload();
-  }
-
-  async function copyText(text) {
-    try {
-      await navigator.clipboard.writeText(text);
-      toast("Copied to clipboard");
-    } catch (e) {
-      // fallback
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      ta.remove();
-      toast("Copied to clipboard");
-    }
-  }
-
-  function normaliseLookupRows(item, data) {
-    // backend returns {items:[{id,name,type}]} (preferred) or {items:[...]} or {enterprise_id:...}
-    if (!data) return [];
-    if (item === "enterprise") {
-      const eid = data.enterprise_id || data.enterpriseId || data.EnterpriseId || data.id;
-      if (!eid) return [];
-      return [{ id: eid, name: "Enterprise", type: "enterprise" }];
-    }
-    const items = data.items || data.Items || data.results || [];
-    return items.map((it) => ({
-      id: it.id || it.Id || it.value || it.Value,
-      name: it.name || it.Name || it.label || it.Label || it.id || it.Id,
-      type: it.type || it.Type || item,
-    })).filter(r => r.id);
-  }
-
-  async function runLookup(item) {
-    const { environment, accessToken } = getEnvAndToken();
-
-    showIdError("");
-    idResults.style.display = "none";
-    idTbody.innerHTML = "";
-
-    if (!accessToken) {
-      showIdError("Missing access token");
-      return;
+    function showIdError(msg) {
+      idError.textContent  = msg || "";
+      idError.style.display = msg ? "block" : "none";
     }
 
-    // Disable buttons while loading
-    const buttons = Array.from(document.querySelectorAll('.mini-btn[data-item]'));
-    buttons.forEach(b => b.disabled = true);
+    function itemToJsonKey(item) {
+      const map = {
+        services:              "ServiceId",
+        roomcategories:        "ResourceCategoryId",
+        rates:                 "RateId",
+        products:              "ProductId",
+        accountingcategories:  "AccountingCategoryId",
+        agecategories:         "AgeCategoryId",
+      };
+      return map[item] || "Id";
+    }
 
-    try {
-      const resp = await fetch(BACKEND + "/lookup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          environment,
-          access_token: accessToken,
-          item
-        })
-      });
-
-      const json = await resp.json().catch(() => ({}));
-      if (!resp.ok) {
-        showIdError(json.error || json.message || `Lookup failed (${resp.status})`);
+    function renderPayload() {
+      if (!payloadLines.length) {
+        payloadBox.textContent    = '// Click "Add" on any ID to build your JSON payload';
+        payloadSection.style.display = "none";
         return;
       }
-
-      const rows = normaliseLookupRows(item, json);
-      if (!rows.length) {
-        showIdError("No results returned.");
-        return;
-      }
-
-      rows.forEach((row) => {
-        const tr = document.createElement("tr");
-
-        const tdName = document.createElement("td");
-        tdName.textContent = row.name || "";
-        tr.appendChild(tdName);
-
-        const tdId = document.createElement("td");
-        const code = document.createElement("code");
-        code.textContent = row.id;
-        tdId.appendChild(code);
-        tr.appendChild(tdId);
-
-        const tdActions = document.createElement("td");
-        tdActions.style.textAlign = "right";
-        const wrap = document.createElement("div");
-        wrap.className = "row-actions";
-
-        const copyBtn = document.createElement("button");
-        copyBtn.className = "tiny";
-        copyBtn.type = "button";
-        copyBtn.textContent = "Copy";
-        copyBtn.addEventListener("click", () => copyText(row.id));
-
-        const addBtn = document.createElement("button");
-        addBtn.className = "tiny primary";
-        addBtn.type = "button";
-        addBtn.textContent = "Add";
-        addBtn.addEventListener("click", () => addPayloadLine(item, row.id));
-
-        wrap.appendChild(copyBtn);
-        wrap.appendChild(addBtn);
-
-        tdActions.appendChild(wrap);
-        tr.appendChild(tdActions);
-
-        idTbody.appendChild(tr);
-      });
-
-      idResults.style.display = "block";
-    } catch (err) {
-      showIdError("Lookup failed. Check backend URL and network connection.");
-    } finally {
-      buttons.forEach(b => b.disabled = false);
+      payloadSection.style.display = "block";
+      payloadBox.textContent = payloadLines.join("\n");
     }
-  }
 
-  // Wire up ID helper buttons
-  document.querySelectorAll('.mini-btn[data-item]').forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const item = btn.getAttribute("data-item");
-      runLookup(item);
-    });
-  });
-
-  if (copyPayloadBtn) {
-    copyPayloadBtn.addEventListener("click", () => copyText(payloadLines.join("\n")));
-  }
-  if (clearPayloadBtn) {
-    clearPayloadBtn.addEventListener("click", () => {
-      payloadLines.length = 0;
+    function addPayloadLine(item, id) {
+      payloadLines.push(`"${itemToJsonKey(item)}": "${id}",`);
       renderPayload();
+    }
+
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        toast("Copied to clipboard");
+      } catch (e) {
+        const ta = document.createElement("textarea");
+        ta.value = text; document.body.appendChild(ta); ta.select();
+        document.execCommand("copy"); ta.remove();
+        toast("Copied to clipboard");
+      }
+    }
+
+    function toast(msg) {
+      const el = document.createElement("div");
+      el.textContent = msg;
+      Object.assign(el.style, {
+        position:"fixed", bottom:"28px", left:"50%", transform:"translateX(-50%)",
+        background:"#F7BCF1", color:"#0D0E12", fontFamily:"inherit",
+        fontWeight:"700", fontSize:"13px", padding:"10px 20px",
+        borderRadius:"999px", zIndex:"9999", boxShadow:"0 4px 18px rgba(0,0,0,.35)",
+        transition:"opacity .3s"
+      });
+      document.body.appendChild(el);
+      setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 350); }, 1800);
+    }
+
+    function normaliseLookupRows(item, data) {
+      if (!data) return [];
+      if (item === "enterprise") {
+        const eid = data.enterprise_id || data.enterpriseId || data.EnterpriseId || data.id;
+        return eid ? [{ id: eid, name: "Enterprise", type: "enterprise" }] : [];
+      }
+      const items = data.items || data.Items || data.results || [];
+      return items
+        .map(it => ({
+          id:   it.id   || it.Id   || it.value || it.Value,
+          name: it.name || it.Name || it.label || it.Label || it.id || it.Id,
+          type: it.type || it.Type || item,
+        }))
+        .filter(r => r.id);
+    }
+
+    async function runLookup(item) {
+      const environment = idEnvEl.value;
+      const accessToken = idAccessTokenEl.value.trim();
+
+      showIdError("");
+      idResults.style.display  = "none";
+      idTbody.innerHTML        = "";
+
+      if (!accessToken) { showIdError("Missing access token"); return; }
+
+      const buttons = Array.from(document.querySelectorAll('.mini-btn[data-item]'));
+      buttons.forEach(b => b.disabled = true);
+
+      try {
+        const resp = await fetch(BACKEND + "/lookup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ environment, access_token: accessToken, item })
+        });
+
+        const json = await resp.json().catch(() => ({}));
+        if (!resp.ok) { showIdError(json.error || json.message || `Lookup failed (${resp.status})`); return; }
+
+        const rows = normaliseLookupRows(item, json);
+        if (!rows.length) { showIdError("No results returned."); return; }
+
+        rows.forEach(row => {
+          const tr = document.createElement("tr");
+
+          const tdName = document.createElement("td");
+          tdName.textContent = row.name || "";
+          tr.appendChild(tdName);
+
+          const tdId   = document.createElement("td");
+          const code   = document.createElement("code");
+          code.textContent = row.id;
+          tdId.appendChild(code);
+          tr.appendChild(tdId);
+
+          const tdAct  = document.createElement("td");
+          tdAct.style.textAlign = "right";
+          const wrap   = document.createElement("div");
+          wrap.className = "row-actions";
+
+          const copyBtn = document.createElement("button");
+          copyBtn.className = "tiny"; copyBtn.type = "button"; copyBtn.textContent = "Copy";
+          copyBtn.addEventListener("click", () => copyText(row.id));
+
+          const addBtn  = document.createElement("button");
+          addBtn.className = "tiny primary"; addBtn.type = "button"; addBtn.textContent = "Add";
+          addBtn.addEventListener("click", () => addPayloadLine(item, row.id));
+
+          wrap.appendChild(copyBtn); wrap.appendChild(addBtn);
+          tdAct.appendChild(wrap);
+          tr.appendChild(tdAct);
+          idTbody.appendChild(tr);
+        });
+
+        idResults.style.display = "block";
+      } catch (err) {
+        showIdError("Lookup failed. Check backend URL and network.");
+      } finally {
+        buttons.forEach(b => b.disabled = false);
+      }
+    }
+
+    document.querySelectorAll('.mini-btn[data-item]').forEach(btn => {
+      btn.addEventListener("click", () => runLookup(btn.getAttribute("data-item")));
     });
-  }
-</script>
+
+    copyPayloadBtn.addEventListener("click",  () => copyText(payloadLines.join("\n")));
+    clearPayloadBtn.addEventListener("click", () => { payloadLines.length = 0; renderPayload(); });
+  </script>
 </body>
 </html>
