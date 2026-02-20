@@ -33,6 +33,12 @@
       font-display: swap;
     }
     @font-face {
+      font-family: 'soehne';
+      src: url('https://www.mews.com/_next/static/media/f7ec71f5af9447a3-s.p.woff2') format('woff2');
+      font-weight: 900;
+      font-display: swap;
+    }
+    @font-face {
       font-family: 'soehne Fallback';
       src: local('Arial');
       ascent-override: 116.77%;
@@ -82,12 +88,12 @@
     .logo { width: 110px; height: auto; display: block; }
 
     .page-title {
-      font-size: clamp(28px, 4vw, 42px);
-      font-weight: 700;
-      letter-spacing: -0.03em;
+      font-size: clamp(32px, 4.5vw, 48px);
+      font-weight: 900;
+      letter-spacing: -0.04em;
       text-align: center;
       margin: 0 0 14px;
-      line-height: 1.1;
+      line-height: 1.05;
       color: var(--text-dark);
     }
 
@@ -100,13 +106,13 @@
       max-width: 48ch;
     }
 
-    /* ── Card — black box with pink left accent ── */
+    /* ── Card — black box with curved left indentation ── */
     .card {
       background: var(--card);
       border: 1px solid var(--border);
       border-left: 10px solid var(--pink);
-      border-radius: var(--radius);
-      padding: 32px 32px 32px 42px;
+      border-radius: 80px 14px 14px 80px;
+      padding: 32px 42px 32px 52px;
       margin-bottom: 24px;
       color: var(--text-light);
     }
@@ -374,19 +380,18 @@
       <div id="msgOk" class="msg ok"></div>
       <div id="msgErr" class="msg err"></div>
 
-      <div class="row">
-        <div class="form-group">
-          <label for="environment">Environment</label>
-          <select id="environment">
-            <option value="product">Production</option>
-            <option value="demo" selected>Demo</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label for="accessToken">Access token</label>
-          <input id="accessToken" type="password" autocomplete="off" placeholder="AccessToken">
-          <div class="hint" id="accessTokenHint">Connector API access token</div>
-        </div>
+      <div class="form-group">
+        <label for="environment">Environment</label>
+        <select id="environment">
+          <option value="product">Production</option>
+          <option value="demo" selected>Demo</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="accessToken">Access token</label>
+        <input id="accessToken" type="password" autocomplete="off" placeholder="AccessToken">
+        <div class="hint" id="accessTokenHint">Connector API access token</div>
       </div>
 
       <div class="toggleRow">
@@ -405,18 +410,17 @@
       <h2 class="card-title">ID Helper</h2>
       <p class="card-desc">Fetch IDs for common objects and build a JSON snippet for API calls.</p>
 
-      <div class="row">
-        <div class="form-group">
-          <label for="idEnvironment">Environment</label>
-          <select id="idEnvironment">
-            <option value="product">Production</option>
-            <option value="demo" selected>Demo</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label for="idAccessToken">Access token</label>
-          <input id="idAccessToken" type="password" autocomplete="off" placeholder="AccessToken">
-        </div>
+      <div class="form-group">
+        <label for="idEnvironment">Environment</label>
+        <select id="idEnvironment">
+          <option value="product">Production</option>
+          <option value="demo" selected>Demo</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="idAccessToken">Access token</label>
+        <input id="idAccessToken" type="password" autocomplete="off" placeholder="AccessToken">
       </div>
 
       <div class="divider"></div>
