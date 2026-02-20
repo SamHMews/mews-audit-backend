@@ -116,17 +116,25 @@
       isolation: isolate;
       border-radius: 0;
       overflow: hidden;
-      background: #2D2C37; /* Solid background for expanded content */
     }
 
     /* SVG background with exact Figma curve */
     .card-svg-bg {
       position: absolute;
-      top: 0;
-      left: 0;
+      inset: 0;
       width: 100%;
-      height: 230px; /* Fixed height - prevents stretching */
+      height: 100%;
       z-index: -1;
+    }
+
+    /* When card has expanded content - fix SVG and add solid background */
+    .card.has-expanded-content {
+      background: #2D2C37;
+    }
+
+    .card.has-expanded-content .card-svg-bg {
+      height: 230px;
+      bottom: auto;
     }
 
     .card-title {
@@ -483,7 +491,7 @@
     </div>
 
     <!-- ── ID Helper ── -->
-    <div class="card">
+    <div class="card" id="idHelperCard">
       <svg class="card-svg-bg" viewBox="0 0 1282 764" fill="none" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
         <path d="M1282 0V764H0V149.2891C0 135.8402 23.1597 124.4815 54.708 120.9375L64.5557 119.665C67.5646 119.3015 69.0234 117.0296 69.0234 114.667C69.0233 112.3953 67.4733 110.0324 64.5557 109.6689L54.708 108.3975C23.1599 104.8535 0.000321887 93.4946 0 80.0459V0H1282Z" fill="#2D2C37"/>
       </svg>
@@ -735,10 +743,12 @@
     async function runLookup(item) {
       const environment = idEnvEl.value;
       const accessToken = idAccessTokenEl.value.trim();
+      const idHelperCard = document.getElementById("idHelperCard");
 
       showIdError("");
       idResults.style.display  = "none";
       idTbody.innerHTML        = "";
+      if (idHelperCard) idHelperCard.classList.remove("has-expanded-content");
 
       if (!accessToken) { showIdError("Missing access token"); return; }
 
@@ -791,6 +801,7 @@
         });
 
         idResults.style.display = "block";
+        if (idHelperCard) idHelperCard.classList.add("has-expanded-content");
       } catch (err) {
         showIdError("Lookup failed. Check backend URL and network.");
       } finally {
