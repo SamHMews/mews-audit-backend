@@ -127,6 +127,27 @@
       z-index: -1;
     }
 
+    /* Background extension for expanded content */
+    .card-bg-extension {
+      display: none;
+      background: #2D2C37;
+      margin-top: -24px; /* Overlap the card's margin-bottom */
+      margin-bottom: 24px;
+      padding: 0 65px 70px 65px;
+      color: var(--text-light); /* Ensure text color is inherited */
+    }
+
+    .card-bg-extension.visible {
+      display: block;
+    }
+
+    /* Ensure proper styling for content in extension */
+    .card-bg-extension table,
+    .card-bg-extension th,
+    .card-bg-extension td {
+      color: inherit;
+    }
+
     .card-title {
       font-size: 17px;
       font-weight: 600;
@@ -481,7 +502,7 @@
     </div>
 
     <!-- ── ID Helper ── -->
-    <div class="card">
+    <div class="card" id="idHelperCard">
       <svg class="card-svg-bg" viewBox="0 0 1282 764" fill="none" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
         <path d="M1282 0V764H0V149.2891C0 135.8402 23.1597 124.4815 54.708 120.9375L64.5557 119.665C67.5646 119.3015 69.0234 117.0296 69.0234 114.667C69.0233 112.3953 67.4733 110.0324 64.5557 109.6689L54.708 108.3975C23.1599 104.8535 0.000321887 93.4946 0 80.0459V0H1282Z" fill="#2D2C37"/>
       </svg>
@@ -533,6 +554,9 @@
         </div>
       </div>
     </div>
+
+    <!-- Background extension for expanded ID Helper content -->
+    <div class="card-bg-extension" id="idHelperBgExtension"></div>
 
   </div><!-- /container -->
 
@@ -656,6 +680,9 @@
 
     const payloadLines = [];
 
+    // Store original parent for restoring elements
+    const originalParent = idResults.parentElement;
+
     function showIdError(msg) {
       idError.textContent  = msg || "";
       idError.style.display = msg ? "block" : "none";
@@ -733,10 +760,20 @@
     async function runLookup(item) {
       const environment = idEnvEl.value;
       const accessToken = idAccessTokenEl.value.trim();
+      const bgExtension = document.getElementById("idHelperBgExtension");
 
       showIdError("");
       idResults.style.display  = "none";
       idTbody.innerHTML        = "";
+
+      // Move elements back to original parent and hide extension
+      if (bgExtension && originalParent) {
+        bgExtension.classList.remove("visible");
+        if (idResults.parentElement === bgExtension) {
+          originalParent.appendChild(idResults);
+          originalParent.appendChild(payloadSection);
+        }
+      }
 
       if (!accessToken) { showIdError("Missing access token"); return; }
 
@@ -788,6 +825,12 @@
           idTbody.appendChild(tr);
         });
 
+        // Move results to extension div
+        if (bgExtension) {
+          bgExtension.appendChild(idResults);
+          bgExtension.appendChild(payloadSection);
+          bgExtension.classList.add("visible");
+        }
         idResults.style.display = "block";
       } catch (err) {
         showIdError("Lookup failed. Check backend URL and network.");
