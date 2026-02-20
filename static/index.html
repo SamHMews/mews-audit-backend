@@ -116,14 +116,16 @@
       isolation: isolate;
       border-radius: 0;
       overflow: hidden;
+      background: #2D2C37; /* Solid background for expanded content */
     }
 
     /* SVG background with exact Figma curve */
     .card-svg-bg {
       position: absolute;
-      inset: 0;
+      top: 0;
+      left: 0;
       width: 100%;
-      height: 100%;
+      height: 230px; /* Fixed height - prevents stretching */
       z-index: -1;
     }
 
