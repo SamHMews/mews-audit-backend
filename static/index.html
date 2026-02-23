@@ -434,6 +434,171 @@
       margin-right: 8px;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── AI Payload Builder ── */
+    .chat-window {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-height: 420px;
+      overflow-y: auto;
+      padding: 4px 0 8px;
+      margin-bottom: 16px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.12) transparent;
+    }
+
+    .chat-bubble {
+      max-width: 88%;
+      padding: 11px 15px;
+      border-radius: 14px;
+      font-size: 13.5px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .chat-bubble.user {
+      align-self: flex-end;
+      background: rgba(247,188,241,0.14);
+      border: 1px solid rgba(247,188,241,0.22);
+      color: var(--text-light);
+      border-bottom-right-radius: 4px;
+    }
+
+    .chat-bubble.assistant {
+      align-self: flex-start;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: rgba(255,255,255,0.88);
+      border-bottom-left-radius: 4px;
+    }
+
+    /* Code blocks inside assistant messages */
+    .chat-bubble.assistant pre {
+      background: rgba(0,0,0,0.5);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 8px;
+      padding: 12px 14px;
+      overflow-x: auto;
+      margin: 10px 0 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11.5px;
+      line-height: 1.5;
+      color: rgba(255,255,255,0.80);
+      white-space: pre;
+    }
+
+    .chat-bubble.assistant code {
+      background: transparent;
+      padding: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11.5px;
+    }
+
+    .chat-input-row {
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    .chat-input {
+      flex: 1;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 10px;
+      padding: 11px 14px;
+      color: var(--text-light);
+      font-family: inherit;
+      font-size: 14px;
+      line-height: 1.4;
+      resize: none;
+      min-height: 44px;
+      max-height: 130px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      overflow-y: auto;
+    }
+
+    .chat-input::placeholder { color: rgba(255,255,255,0.28); }
+
+    .chat-input:focus {
+      outline: none;
+      border-color: var(--pink);
+      box-shadow: 0 0 0 3px rgba(247,188,241,0.08);
+    }
+
+    .chat-send-btn {
+      background: var(--pink);
+      color: #0D0E12;
+      border: none;
+      border-radius: 10px;
+      width: 44px;
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: opacity 0.15s, transform 0.15s;
+    }
+    .chat-send-btn:hover { opacity: 0.88; transform: translateY(-1px); }
+    .chat-send-btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+
+    .chat-send-btn svg { display: block; }
+
+    .ai-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 14px;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .ai-spinner {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--muted-light);
+    }
+
+    .ai-spinner.visible { display: flex; }
+
+    .dot-pulse {
+      display: inline-flex;
+      gap: 4px;
+    }
+
+    .dot-pulse span {
+      width: 5px;
+      height: 5px;
+      background: var(--pink);
+      border-radius: 50%;
+      animation: dotBounce 1.2s infinite ease-in-out;
+    }
+    .dot-pulse span:nth-child(2) { animation-delay: 0.2s; }
+    .dot-pulse span:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes dotBounce {
+      0%, 80%, 100% { transform: scale(0.7); opacity: 0.4; }
+      40%           { transform: scale(1.0); opacity: 1;   }
+    }
+
+    .ai-empty-state {
+      text-align: center;
+      padding: 32px 16px;
+      color: var(--muted-light);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .ai-empty-state strong {
+      display: block;
+      font-size: 15px;
+      color: rgba(255,255,255,0.55);
+      margin-bottom: 8px;
+    }
   </style>
 </head>
 
@@ -531,6 +696,47 @@
           <button class="mini-btn" id="copyPayload" type="button">Copy payload</button>
           <button class="tiny"     id="clearPayload" type="button">Clear</button>
         </div>
+      </div>
+    </div>
+
+    <!-- ── AI Payload Builder ── -->
+    <div class="card">
+      <svg class="card-svg-bg" viewBox="0 0 1282 764" fill="none" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M1282 0V764H0V149.2891C0 135.8402 23.1597 124.4815 54.708 120.9375L64.5557 119.665C67.5646 119.3015 69.0234 117.0296 69.0234 114.667C69.0233 112.3953 67.4733 110.0324 64.5557 109.6689L54.708 108.3975C23.1599 104.8535 0.000321887 93.4946 0 80.0459V0H1282Z" fill="#2D2C37"/>
+      </svg>
+      <h2 class="card-title">AI Payload Builder</h2>
+      <p class="card-desc">Describe what you want to do and the AI will ask follow-up questions to build a complete Mews Connector API payload for Zapier or Postman.</p>
+
+      <div class="chat-window" id="chatWindow">
+        <div class="ai-empty-state" id="aiEmptyState">
+          <strong>How can I help you?</strong>
+          Try: "I want to create a reservation" or "I want to add breakfast to a booking"
+        </div>
+      </div>
+
+      <div class="chat-input-row">
+        <textarea
+          id="chatInput"
+          class="chat-input"
+          placeholder="I want to…"
+          rows="1"
+          maxlength="2000"
+        ></textarea>
+        <button id="chatSendBtn" class="chat-send-btn" type="button" title="Send">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M5 12H19M19 12L13 6M19 12L13 18" stroke="#0D0E12" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="ai-footer">
+        <div class="ai-spinner" id="aiSpinner">
+          <div class="dot-pulse">
+            <span></span><span></span><span></span>
+          </div>
+          Thinking…
+        </div>
+        <button class="tiny" id="aiResetBtn" type="button" style="margin-left:auto">New conversation</button>
       </div>
     </div>
 
@@ -802,6 +1008,134 @@
 
     copyPayloadBtn.addEventListener("click",  () => copyText(payloadLines.join("\n")));
     clearPayloadBtn.addEventListener("click", () => { payloadLines.length = 0; renderPayload(); });
+
+    // ── AI Payload Builder ────────────────────────────────────────────
+
+    const chatWindow   = document.getElementById("chatWindow");
+    const chatInput    = document.getElementById("chatInput");
+    const chatSendBtn  = document.getElementById("chatSendBtn");
+    const aiSpinner    = document.getElementById("aiSpinner");
+    const aiResetBtn   = document.getElementById("aiResetBtn");
+    const aiEmptyState = document.getElementById("aiEmptyState");
+
+    // Conversation history sent to the backend with each request
+    let aiMessages = [];
+
+    // Auto-grow textarea
+    chatInput.addEventListener("input", () => {
+      chatInput.style.height = "auto";
+      chatInput.style.height = Math.min(chatInput.scrollHeight, 130) + "px";
+    });
+
+    // Send on Enter (Shift+Enter = newline)
+    chatInput.addEventListener("keydown", e => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendAiMessage();
+      }
+    });
+
+    chatSendBtn.addEventListener("click", sendAiMessage);
+    aiResetBtn.addEventListener("click",  resetAiChat);
+
+    function escapeHtml(str) {
+      return str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    // Very lightweight markdown renderer: code fences → <pre><code>, **bold**, inline `code`
+    function renderMarkdown(text) {
+      // Fenced code blocks
+      text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+        return `<pre><code>${escapeHtml(code.trimEnd())}</code></pre>`;
+      });
+      // Inline code
+      text = text.replace(/`([^`]+)`/g, (_, c) => `<code>${escapeHtml(c)}</code>`);
+      // Bold
+      text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+      // Escape remaining HTML in non-code sections (already escaped above, this handles leftovers)
+      // Line breaks
+      text = text.replace(/\n/g, "<br>");
+      return text;
+    }
+
+    function appendBubble(role, text) {
+      // Remove empty state on first message
+      if (aiEmptyState) aiEmptyState.style.display = "none";
+
+      const bubble = document.createElement("div");
+      bubble.className = `chat-bubble ${role}`;
+
+      if (role === "assistant") {
+        bubble.innerHTML = renderMarkdown(text);
+      } else {
+        bubble.textContent = text;
+      }
+
+      chatWindow.appendChild(bubble);
+      chatWindow.scrollTop = chatWindow.scrollHeight;
+      return bubble;
+    }
+
+    async function sendAiMessage() {
+      const userText = chatInput.value.trim();
+      if (!userText) return;
+
+      // Add to UI + history
+      appendBubble("user", userText);
+      aiMessages.push({ role: "user", content: userText });
+
+      chatInput.value = "";
+      chatInput.style.height = "auto";
+      chatSendBtn.disabled = true;
+      chatInput.disabled = true;
+      aiSpinner.classList.add("visible");
+
+      try {
+        const resp = await fetch(`${BACKEND}/ai-payload`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: aiMessages }),
+        });
+
+        const data = await resp.json().catch(() => ({}));
+
+        if (!resp.ok || !data.ok) {
+          const errMsg = data.error || `Request failed (${resp.status})`;
+          appendBubble("assistant", `\u26a0\ufe0f ${errMsg}`);
+          // Pop last user message from history so user can retry
+          aiMessages.pop();
+        } else {
+          appendBubble("assistant", data.reply);
+          aiMessages.push({ role: "assistant", content: data.reply });
+        }
+      } catch (err) {
+        appendBubble("assistant", "\u26a0\ufe0f Could not reach the backend. Check your network connection.");
+        aiMessages.pop();
+      } finally {
+        chatSendBtn.disabled = false;
+        chatInput.disabled = false;
+        aiSpinner.classList.remove("visible");
+        chatInput.focus();
+      }
+    }
+
+    function resetAiChat() {
+      aiMessages = [];
+      chatWindow.innerHTML = "";
+      // Re-add empty state
+      const emptyDiv = document.createElement("div");
+      emptyDiv.className = "ai-empty-state";
+      emptyDiv.id = "aiEmptyState";
+      emptyDiv.innerHTML = "<strong>How can I help you?</strong>Try: \"I want to create a reservation\" or \"I want to add breakfast to a booking\"";
+      chatWindow.appendChild(emptyDiv);
+      chatInput.value = "";
+      chatInput.style.height = "auto";
+      chatInput.focus();
+    }
   </script>
 </body>
 </html>
