@@ -2192,13 +2192,14 @@ def lookup_ids():
             ]
             return jsonify({"ok": False, "error": "unsupported_item", "details": f"Unsupported item '{item}'. Supported: {supported}"}), 400
 
-        # Serialise call log safely (ApiCall has no as_dict in v29b)
+        # Serialise call log safely
         calls_out = []
         for c in (getattr(conn, "calls", None) or []):
             calls_out.append({
-                "endpoint": getattr(c, "endpoint", None),
+                "endpoint": getattr(c, "operation", None),
                 "status_code": getattr(c, "status_code", None),
                 "duration_ms": getattr(c, "duration_ms", None),
+                "ok": getattr(c, "ok", None),
             })
 
         return jsonify({
@@ -2212,7 +2213,17 @@ def lookup_ids():
         })
     except Exception as e:
         logging.exception("LOOKUP ERROR")
-        return jsonify({"ok": False, "error": "lookup_failed", "details": str(e)}), 500
+        err_str = str(e)
+        if "HTTP 525" in err_str or "SSL handshake" in err_str:
+            return jsonify({"ok": False, "error": "ssl_error",
+                            "details": "The Mews API returned an SSL handshake error (525). This is transient — please try again in a few minutes."}), 503
+        if "HTTP 401" in err_str or "HTTP 403" in err_str:
+            return jsonify({"ok": False, "error": "auth_error",
+                            "details": "Authentication failed. Check that your access token matches the selected environment (Demo vs Production)."}), 401
+        if "HTTP 502" in err_str or "HTTP 503" in err_str or "HTTP 504" in err_str:
+            return jsonify({"ok": False, "error": "server_error",
+                            "details": "The Mews API is temporarily unavailable. Please try again in a few minutes."}), 503
+        return jsonify({"ok": False, "error": "lookup_failed", "details": err_str}), 500
 
 
 @app.post("/audit")
@@ -2288,6 +2299,11 @@ def audit():
                         "Authentication failed (HTTP %d). "
                         "Check that your access token and client token both belong to the same environment "
                         "(Demo vs Production)." % first_status
+                    )
+                elif first_status in (502, 503, 504):
+                    details = (
+                        "The Mews API servers are temporarily unavailable (HTTP %d). "
+                        "Please try again in a few minutes." % first_status
                     )
                 else:
                     details = (

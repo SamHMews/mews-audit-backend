@@ -561,7 +561,7 @@
   </div><!-- /container -->
 
   <script>
-    const BACKEND = "https://mews-audit-backend.onrender.com";
+    const BACKEND = ""; // Relative paths — works on any deployment (prod, PR previews, localhost)
     const AUDIT_TIMEOUT_MS = 120000; // 2 minutes for PDF generation
     const LOOKUP_TIMEOUT_MS = 30000; // 30 seconds for ID lookups
 
@@ -632,7 +632,7 @@
 
         if (!res.ok) {
           let detail = `HTTP ${res.status}`;
-          try { const j = await res.clone().json(); detail = j.error || j.details || detail; } catch(_){}
+          try { const j = await res.clone().json(); detail = j.details || j.error || detail; } catch(_){}
           showErr(`Audit failed: ${detail}`);
           btn.disabled = false;
           return;
@@ -794,7 +794,7 @@
         clearTimeout(timeoutId);
 
         const json = await resp.json().catch(() => ({}));
-        if (!resp.ok) { showIdError(json.error || json.message || `Lookup failed (${resp.status})`); return; }
+        if (!resp.ok) { showIdError(json.details || json.error || json.message || `Lookup failed (${resp.status})`); return; }
 
         const rows = normaliseLookupRows(item, json);
         if (!rows.length) { showIdError("No results returned."); return; }
