@@ -743,12 +743,18 @@
       const buttons = Array.from(document.querySelectorAll('.mini-btn[data-item]'));
       buttons.forEach(b => b.disabled = true);
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), LOOKUP_TIMEOUT_MS);
+
       try {
         const resp = await fetch(BACKEND + "/lookup", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ environment, access_token: accessToken, item })
+          body: JSON.stringify({ environment, access_token: accessToken, item }),
+          signal: controller.signal
         });
+
+        clearTimeout(timeoutId);
 
         const json = await resp.json().catch(() => ({}));
         if (!resp.ok) { showIdError(json.error || json.message || `Lookup failed (${resp.status})`); return; }
@@ -790,7 +796,12 @@
 
         idResults.style.display = "block";
       } catch (err) {
-        showIdError("Lookup failed. Check backend URL and network.");
+        clearTimeout(timeoutId);
+        if (err.name === "AbortError") {
+          showIdError("Lookup timed out. Please try again.");
+        } else {
+          showIdError("Lookup failed. Check backend URL and network.");
+        }
       } finally {
         buttons.forEach(b => b.disabled = false);
       }
