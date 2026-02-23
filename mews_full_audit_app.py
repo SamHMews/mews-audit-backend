@@ -3,6 +3,15 @@ import time
 import traceback
 import logging
 import uuid
+import warnings
+
+# Suppress noisy DeprecationWarnings from third-party PDF/SVG libraries
+# (svglib, cssselect2, tinycss2, reportlab) that clutter Render logs.
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"svglib.*")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"cssselect2.*")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"tinycss2.*")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"reportlab.*")
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -2260,16 +2269,41 @@ def audit():
 
             if all_failed or ("configuration_get" in errs and errs.get("configuration_get")):
                 brief = []
+                first_status = None
                 for c in calls[:5]:
                     if isinstance(c, dict):
-                        brief.append(f'{c.get("operation")} -> HTTP {c.get("status_code")}')
+                        sc = c.get("status_code")
+                        if sc and first_status is None:
+                            first_status = sc
+                        brief.append(f'{c.get("operation")} -> HTTP {sc}')
+
+                config_err_str = str(errs.get("configuration_get", ""))
+                if first_status == 525 or "525" in config_err_str:
+                    details = (
+                        "The Mews API returned an SSL handshake error (HTTP 525). "
+                        "This is a transient issue with the Mews demo server — please try again in a few minutes."
+                    )
+                elif first_status in (401, 403):
+                    details = (
+                        "Authentication failed (HTTP %d). "
+                        "Check that your access token and client token both belong to the same environment "
+                        "(Demo vs Production)." % first_status
+                    )
+                else:
+                    details = (
+                        "Common causes: (1) Demo vs Production token mismatch, "
+                        "(2) missing Render env vars DEMO/PRODUCTION, "
+                        "(3) wrong API base for Production. "
+                        "Ensure the access token and client token are from the same environment."
+                    )
+
                 return jsonify({
                     "error": "All API calls failed.",
-                    "details": "Common causes: (1) Demo vs Production token mismatch, (2) missing Render env vars DEMO/PRODUCTION, (3) wrong API base for Production. Ensure the access token and client token are from the same environment.",
+                    "details": details,
                     "environment": env,
                     "api_base": base_url,
                     "first_calls": brief,
-                }), 502
+                }), 503
         except Exception:
             pass
         report = build_report(
