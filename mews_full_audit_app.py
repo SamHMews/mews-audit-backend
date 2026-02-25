@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+import re
 
 import requests
 from flask import Flask, request, jsonify, send_file, render_template_string, send_from_directory
@@ -732,7 +733,6 @@ def parse_utc(dt_str: Any) -> Optional[datetime]:
 
 def parse_iso_duration(duration_str: str) -> str:
     """Convert an ISO 8601 duration string (e.g. 'P0M7DT0H0M0S') to a human-readable form."""
-    import re
     if not duration_str:
         return "Not set"
     pattern = re.compile(
@@ -1337,7 +1337,8 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str, include_
     accounting_items: List[CheckItem] = []
 
     # Editable History Window (EHW) — sourced from Configuration/Get → Enterprise.EditableHistoryInterval
-    ehw_raw = ent.get("EditableHistoryInterval")
+    # Fall back to top-level cfg in case the field is not nested under Enterprise in some API versions.
+    ehw_raw = ent.get("EditableHistoryInterval") or cfg.get("EditableHistoryInterval")
     ehw_readable = parse_iso_duration(ehw_raw) if ehw_raw else "Not set"
     st_ehw, err_ehw = status_for(["configuration_get"], "PASS" if ehw_raw else "WARN")
     accounting_items.append(CheckItem(
