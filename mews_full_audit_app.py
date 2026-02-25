@@ -48,6 +48,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 from svglib.svglib import svg2rlg
 from reportlab.graphics import renderPDF
+from reportlab.graphics.shapes import Drawing, Rect, Path, String as GString
 
 
 # =========================
@@ -1541,6 +1542,251 @@ def fetch_logo():
         return None
 
 
+def build_payment_sankey_drawing(
+    po_charged: List[Dict[str, Any]],
+    po_failed: List[Dict[str, Any]],
+    drawing_w_pt: float,
+) -> Optional[Any]:
+    """Return a scaled reportlab Drawing (via svglib) for the payment Sankey diagram.
+
+    Builds an SVG string, converts it with svg2rlg, and scales to drawing_w_pt.
+    Returns None when there is no data to visualise or conversion fails.
+    """
+    from io import BytesIO as _BytesIO
+
+    # ── Aggregate counts ──────────────────────────────────────────────────────
+    charged_map: Dict[str, int] = {}
+    for r in po_charged:
+        orig = str(r.get("PaymentOrigin") or "None")
+        charged_map[orig] = charged_map.get(orig, 0) + int(r.get("Count") or 0)
+
+    failed_map: Dict[str, int] = {}
+    for r in po_failed:
+        orig = str(r.get("PaymentOrigin") or "None")
+        failed_map[orig] = failed_map.get(orig, 0) + int(r.get("Count") or 0)
+
+    all_origins = sorted(
+        set(list(charged_map.keys()) + list(failed_map.keys())),
+        key=lambda x: -(charged_map.get(x, 0) + failed_map.get(x, 0)),
+    )
+
+    logging.info(
+        "Sankey: charged_origins=%d failed_origins=%d",
+        len(charged_map), len(failed_map),
+    )
+
+    if not all_origins:
+        logging.info("Sankey: no origins — skipping diagram")
+        return None
+
+    total_charged = sum(charged_map.values())
+    total_failed  = sum(failed_map.values())
+    grand_total   = total_charged + total_failed
+    if grand_total == 0:
+        logging.info("Sankey: grand_total=0 — skipping diagram")
+        return None
+
+    logging.info(
+        "Sankey: grand_total=%d total_charged=%d total_failed=%d",
+        grand_total, total_charged, total_failed,
+    )
+
+    MAX_VISIBLE = 12
+    extra_count = max(0, len(all_origins) - MAX_VISIBLE)
+    all_origins = all_origins[:MAX_VISIBLE]
+    n = len(all_origins)
+
+    # ── Layout (SVG top-down pixel space, viewBox 700×auto) ──────────────────
+    SVG_W       = 700
+    NODE_W      = 14
+    ORIGIN_X    = 160   # left edge of origin nodes
+    OUTCOME_X   = 526   # left edge of outcome nodes
+    NODE_GAP    = 8
+    OUTCOME_GAP = 24
+    TOP_MARGIN  = 12
+    BOT_MARGIN  = 16
+    FONT_SZ     = 11
+    MIN_NODE_H  = 16
+
+    target_col_h = max(100, min(300, n * 32))
+    available_h  = max(1, target_col_h - NODE_GAP * max(0, n - 1))
+    px_per_unit  = available_h / grand_total
+
+    origin_heights = [
+        max(MIN_NODE_H, (charged_map.get(o, 0) + failed_map.get(o, 0)) * px_per_unit)
+        for o in all_origins
+    ]
+    charged_node_h = max(MIN_NODE_H, total_charged * px_per_unit) if total_charged else 0
+    failed_node_h  = max(MIN_NODE_H, total_failed  * px_per_unit) if total_failed  else 0
+
+    total_origin_col_h  = sum(origin_heights) + NODE_GAP * max(0, n - 1)
+    total_outcome_col_h = (
+        charged_node_h
+        + (OUTCOME_GAP if total_charged and total_failed else 0)
+        + failed_node_h
+    )
+    max_col_h = max(total_origin_col_h, total_outcome_col_h)
+    note_h    = FONT_SZ + 6 if extra_count else 0
+    SVG_H     = TOP_MARGIN + max_col_h + BOT_MARGIN + note_h
+
+    origin_start_y  = TOP_MARGIN + (max_col_h - total_origin_col_h)  / 2
+    outcome_start_y = TOP_MARGIN + (max_col_h - total_outcome_col_h) / 2
+
+    origin_ys: List[float] = []
+    y = origin_start_y
+    for h in origin_heights:
+        origin_ys.append(y)
+        y += h + NODE_GAP
+
+    charged_top_y = outcome_start_y
+    failed_top_y  = (
+        outcome_start_y
+        + charged_node_h
+        + (OUTCOME_GAP if total_charged and total_failed else 0)
+    )
+
+    cpx = (ORIGIN_X + NODE_W + OUTCOME_X) / 2  # bezier control-point x
+
+    # ── Build SVG ─────────────────────────────────────────────────────────────
+    parts: List[str] = [
+        f'<svg xmlns="http://www.w3.org/2000/svg"'
+        f' width="{SVG_W}" height="{int(SVG_H)}"'
+        f' viewBox="0 0 {SVG_W} {int(SVG_H)}">',
+        f'<rect width="{SVG_W}" height="{int(SVG_H)}"'
+        f' fill="#f9fafb" stroke="#e5e7eb" stroke-width="1" rx="4"/>',
+    ]
+
+    # Flows
+    charged_off = 0.0
+    failed_off  = 0.0
+    for i, orig in enumerate(all_origins):
+        c   = charged_map.get(orig, 0)
+        f   = failed_map.get(orig, 0)
+        tot = c + f
+        if tot == 0:
+            continue
+        node_h = origin_heights[i]
+        c_frac = c / tot if c else 0.0
+
+        if c and total_charged:
+            fh  = max(2, c * px_per_unit)
+            oyt = origin_ys[i]
+            oyb = origin_ys[i] + node_h * c_frac
+            oct = charged_top_y + charged_off
+            ocb = oct + fh
+            charged_off += fh
+            x0, x1 = ORIGIN_X + NODE_W, OUTCOME_X
+            parts.append(
+                f'<path d="M {x0} {oyt:.1f}'
+                f' C {cpx:.1f} {oyt:.1f} {cpx:.1f} {oct:.1f} {x1} {oct:.1f}'
+                f' L {x1} {ocb:.1f}'
+                f' C {cpx:.1f} {ocb:.1f} {cpx:.1f} {oyb:.1f} {x0} {oyb:.1f} Z"'
+                f' fill="#a7f3d0" opacity="0.85"/>'
+            )
+
+        if f and total_failed:
+            fh  = max(2, f * px_per_unit)
+            oyt = origin_ys[i] + node_h * c_frac
+            oyb = origin_ys[i] + node_h
+            oft = failed_top_y + failed_off
+            ofb = oft + fh
+            failed_off += fh
+            x0, x1 = ORIGIN_X + NODE_W, OUTCOME_X
+            parts.append(
+                f'<path d="M {x0} {oyt:.1f}'
+                f' C {cpx:.1f} {oyt:.1f} {cpx:.1f} {oft:.1f} {x1} {oft:.1f}'
+                f' L {x1} {ofb:.1f}'
+                f' C {cpx:.1f} {ofb:.1f} {cpx:.1f} {oyb:.1f} {x0} {oyb:.1f} Z"'
+                f' fill="#fed7aa" opacity="0.85"/>'
+            )
+
+    # Origin nodes
+    for i, orig in enumerate(all_origins):
+        oy, oh = origin_ys[i], origin_heights[i]
+        parts.append(
+            f'<rect x="{ORIGIN_X}" y="{oy:.1f}" width="{NODE_W}" height="{oh:.1f}"'
+            f' fill="#c7d2fe" stroke="#6366f1" stroke-width="1"/>'
+        )
+
+    # Outcome nodes
+    if total_charged:
+        parts.append(
+            f'<rect x="{OUTCOME_X}" y="{charged_top_y:.1f}"'
+            f' width="{NODE_W}" height="{charged_node_h:.1f}"'
+            f' fill="#86efac" stroke="#16a34a" stroke-width="1"/>'
+        )
+    if total_failed:
+        parts.append(
+            f'<rect x="{OUTCOME_X}" y="{failed_top_y:.1f}"'
+            f' width="{NODE_W}" height="{failed_node_h:.1f}"'
+            f' fill="#fca5a5" stroke="#dc2626" stroke-width="1"/>'
+        )
+
+    # Labels
+    FONT = "Helvetica,Arial,sans-serif"
+    for i, orig in enumerate(all_origins):
+        oy, oh = origin_ys[i], origin_heights[i]
+        cnt   = charged_map.get(orig, 0) + failed_map.get(orig, 0)
+        label = f"{orig}  ({cnt:,})"
+        if len(label) > 32:
+            label = label[:29] + "..."
+        ty = oy + oh / 2 + FONT_SZ * 0.38
+        parts.append(
+            f'<text x="{ORIGIN_X - 6}" y="{ty:.1f}"'
+            f' font-family="{FONT}" font-size="{FONT_SZ}"'
+            f' fill="#374151" text-anchor="end">{label}</text>'
+        )
+
+    if total_charged:
+        ty = charged_top_y + charged_node_h / 2 + FONT_SZ * 0.38
+        parts.append(
+            f'<text x="{OUTCOME_X + NODE_W + 6}" y="{ty:.1f}"'
+            f' font-family="{FONT}" font-size="{FONT_SZ}" font-weight="bold"'
+            f' fill="#15803d" text-anchor="start">Charged ({total_charged:,})</text>'
+        )
+    if total_failed:
+        ty = failed_top_y + failed_node_h / 2 + FONT_SZ * 0.38
+        parts.append(
+            f'<text x="{OUTCOME_X + NODE_W + 6}" y="{ty:.1f}"'
+            f' font-family="{FONT}" font-size="{FONT_SZ}" font-weight="bold"'
+            f' fill="#b91c1c" text-anchor="start">Failed / Cancelled ({total_failed:,})</text>'
+        )
+
+    if extra_count:
+        ny = SVG_H - BOT_MARGIN / 2
+        parts.append(
+            f'<text x="{SVG_W // 2}" y="{ny:.1f}"'
+            f' font-family="{FONT}" font-size="9" fill="#6b7280"'
+            f' text-anchor="middle">'
+            f'Top {MAX_VISIBLE} of {MAX_VISIBLE + extra_count} origins shown by volume</text>'
+        )
+
+    parts.append('</svg>')
+    svg_str = '\n'.join(parts)
+
+    # ── Convert SVG → reportlab Drawing via svglib ────────────────────────────
+    try:
+        rlg = svg2rlg(_BytesIO(svg_str.encode('utf-8')))
+        if rlg is None:
+            logging.warning("Sankey: svg2rlg returned None")
+            return None
+        if rlg.width <= 0:
+            logging.warning("Sankey: svg2rlg produced zero-width drawing")
+            return None
+        sx = drawing_w_pt / rlg.width
+        rlg.width  = drawing_w_pt
+        rlg.height = rlg.height * sx
+        rlg.transform = (sx, 0, 0, sx, 0, 0)
+        logging.info(
+            "Sankey: drawing ready %.1f×%.1f pt (%d svg elements)",
+            rlg.width, rlg.height, len(rlg.contents),
+        )
+        return rlg
+    except Exception as exc:
+        logging.warning("Sankey: svg2rlg failed: %s", exc, exc_info=True)
+        return None
+
+
 def build_pdf(report: AuditReport) -> bytes:
     from io import BytesIO
 
@@ -1747,6 +1993,7 @@ def build_pdf(report: AuditReport) -> bytes:
 
         for it in items:
             block: List[Any] = []
+            _sankey_elems: List[Any] = []  # appended to story directly, outside KeepTogether
             block.append(safe_para(f"<b>{esc(it.key)}</b> &nbsp;&nbsp; {badge(it.status)} &nbsp;&nbsp; <font color='#64748b'>Risk:</font> <b>{esc(it.risk)}</b>", "BodyX"))
             block.append(Paragraph(esc(it.summary or "-"), styles["BodyX"]))
             block.append(Spacer(1, 4))
@@ -1906,12 +2153,26 @@ def build_pdf(report: AuditReport) -> bytes:
                 render_po_table("Payment Origin (last 90 days) — Charged", po_charged, err_po_charged)
                 render_po_table("Payment Origin (last 90 days) — Failed / Cancelled", po_failed, err_po_failed, fallback_origins=po_charged)
 
+                # ── Sankey flow diagram ───────────────────────────────────────
+                # Added directly to story (not inside KeepTogether) so that
+                # KeepTogether layout issues with large payment blocks cannot
+                # cause the Drawing to be silently dropped.
+                sankey_d = build_payment_sankey_drawing(po_charged, po_failed, TABLE_FULL_W)
+                if sankey_d is not None:
+                    _sankey_elems.extend([
+                        Spacer(1, 14),
+                        Paragraph("<b>Detail: Payment Flow Diagram (last 90 days)</b>", styles["SmallX"]),
+                        Spacer(1, 6),
+                        sankey_d,
+                        Spacer(1, 8),
+                    ])
 
             if it.source:
                 block.append(Paragraph(f"<font color='#64748b'><b>Source:</b> {esc(it.source)}</font>", styles["TinyX"]))
 
             block.append(Spacer(1, 10))
             story.append(KeepTogether(block))
+            story.extend(_sankey_elems)  # Sankey diagram outside KeepTogether
 
         story.append(PageBreak())
 
