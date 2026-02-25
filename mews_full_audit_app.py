@@ -1983,6 +1983,7 @@ def build_pdf(report: AuditReport) -> bytes:
 
         for it in items:
             block: List[Any] = []
+            _sankey_elems: List[Any] = []  # appended to story directly, outside KeepTogether
             block.append(safe_para(f"<b>{esc(it.key)}</b> &nbsp;&nbsp; {badge(it.status)} &nbsp;&nbsp; <font color='#64748b'>Risk:</font> <b>{esc(it.risk)}</b>", "BodyX"))
             block.append(Paragraph(esc(it.summary or "-"), styles["BodyX"]))
             block.append(Spacer(1, 4))
@@ -2142,20 +2143,26 @@ def build_pdf(report: AuditReport) -> bytes:
                 render_po_table("Payment Origin (last 90 days) — Charged", po_charged, err_po_charged)
                 render_po_table("Payment Origin (last 90 days) — Failed / Cancelled", po_failed, err_po_failed, fallback_origins=po_charged)
 
-                # ── Sankey flow diagram ────────────────────────────────────────
+                # ── Sankey flow diagram ───────────────────────────────────────
+                # Added directly to story (not inside KeepTogether) so that
+                # KeepTogether layout issues with large payment blocks cannot
+                # cause the Drawing to be silently dropped.
                 sankey_d = build_payment_sankey_drawing(po_charged, po_failed, TABLE_FULL_W)
                 if sankey_d is not None:
-                    block.append(Spacer(1, 14))
-                    block.append(Paragraph("<b>Detail: Payment Flow Diagram (last 90 days)</b>", styles["SmallX"]))
-                    block.append(Spacer(1, 6))
-                    block.append(sankey_d)
-                    block.append(Spacer(1, 8))
+                    _sankey_elems.extend([
+                        Spacer(1, 14),
+                        Paragraph("<b>Detail: Payment Flow Diagram (last 90 days)</b>", styles["SmallX"]),
+                        Spacer(1, 6),
+                        sankey_d,
+                        Spacer(1, 8),
+                    ])
 
             if it.source:
                 block.append(Paragraph(f"<font color='#64748b'><b>Source:</b> {esc(it.source)}</font>", styles["TinyX"]))
 
             block.append(Spacer(1, 10))
             story.append(KeepTogether(block))
+            story.extend(_sankey_elems)  # Sankey diagram outside KeepTogether
 
         story.append(PageBreak())
 
