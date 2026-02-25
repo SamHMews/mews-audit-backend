@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+import re
 
 import requests
 from flask import Flask, request, jsonify, send_file, render_template_string, send_from_directory
@@ -731,6 +732,34 @@ def parse_utc(dt_str: Any) -> Optional[datetime]:
         return None
 
 
+def parse_iso_duration(duration_str: str) -> str:
+    """Convert an ISO 8601 duration string (e.g. 'P0M7DT0H0M0S') to a human-readable form."""
+    if not duration_str:
+        return "Not set"
+    pattern = re.compile(
+        r'P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?',
+        re.IGNORECASE,
+    )
+    m = pattern.match(duration_str.strip())
+    if not m:
+        return duration_str
+    years, months, days, hours, minutes, seconds = [int(x or 0) for x in m.groups()]
+    parts = []
+    if years:
+        parts.append(f"{years} Year{'s' if years != 1 else ''}")
+    if months:
+        parts.append(f"{months} Month{'s' if months != 1 else ''}")
+    if days:
+        parts.append(f"{days} Day{'s' if days != 1 else ''}")
+    if hours:
+        parts.append(f"{hours} Hour{'s' if hours != 1 else ''}")
+    if minutes:
+        parts.append(f"{minutes} Minute{'s' if minutes != 1 else ''}")
+    if seconds:
+        parts.append(f"{seconds} Second{'s' if seconds != 1 else ''}")
+    return ", ".join(parts) if parts else "0 Days"
+
+
 def build_accounting_categories_table(accounting_categories: List[Dict[str, Any]],
                                       products: List[Dict[str, Any]],
                                       services: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1307,6 +1336,22 @@ def build_report(data: Dict[str, Any], base_url: str, client_name: str, include_
     sections.append(("Legal & property baseline", legal_items))
 
     accounting_items: List[CheckItem] = []
+
+    # Editable History Window (EHW) — sourced from Configuration/Get → Enterprise.EditableHistoryInterval
+    # Fall back to top-level cfg in case the field is not nested under Enterprise in some API versions.
+    ehw_raw = ent.get("EditableHistoryInterval") or cfg.get("EditableHistoryInterval")
+    ehw_readable = parse_iso_duration(ehw_raw) if ehw_raw else "Not set"
+    st_ehw, err_ehw = status_for(["configuration_get"], "PASS" if ehw_raw else "WARN")
+    accounting_items.append(CheckItem(
+        key="Editable history window (EHW)",
+        status=st_ehw,
+        summary=f"EditableHistoryInterval: {ehw_readable}",
+        source="Connector: Configuration/Get",
+        remediation="Review the editable history window in Mews settings. A shorter window reduces exposure to retrospective changes; ensure it aligns with your audit and finance policies.",
+        details={"EditableHistoryWindowTable": [{"Editable History Window": ehw_readable}]},
+        risk="High" if not ehw_raw else "Low",
+    ))
+
     st_ac, err_ac = status_for(["accounting_categories_getall"], "PASS" if accounting_categories else "WARN")
     s = f"Accounting categories returned: {len(accounting_categories)}"
     if err_ac:
@@ -2007,6 +2052,14 @@ def build_pdf(report: AuditReport) -> bytes:
                 for ch in chunk_list(rows, chunk):
                     block.append(make_long_table(header, ch, colw))
                     block.append(Spacer(1, 6))
+
+            if "EditableHistoryWindowTable" in details:
+                render_dict_table(
+                    "Editable history window",
+                    ["Editable History Window"],
+                    details.get("EditableHistoryWindowTable") or [],
+                    [154 * mm],
+                )
 
             if "AccountingCategoriesTable" in details:
                 render_dict_table(

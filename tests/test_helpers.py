@@ -13,6 +13,8 @@ from mews_full_audit_app import (
     _deduplicate_by_id,
     _count_by_field,
     money_from_extended_amount,
+    parse_iso_duration,
+    build_report,
 )
 
 
@@ -219,3 +221,99 @@ class TestMoneyFromExtendedAmount:
 
     def test_empty_dict(self):
         assert money_from_extended_amount({}) == ""
+
+
+class TestParseIsoDuration:
+    def test_none(self):
+        assert parse_iso_duration(None) == "Not set"
+
+    def test_empty_string(self):
+        assert parse_iso_duration("") == "Not set"
+
+    def test_seven_days(self):
+        assert parse_iso_duration("P0M7DT0H0M0S") == "7 Days"
+
+    def test_one_day(self):
+        assert parse_iso_duration("P1D") == "1 Day"
+
+    def test_one_month(self):
+        assert parse_iso_duration("P1M") == "1 Month"
+
+    def test_one_month_seven_days(self):
+        assert parse_iso_duration("P1M7D") == "1 Month, 7 Days"
+
+    def test_zero_duration(self):
+        assert parse_iso_duration("P0D") == "0 Days"
+
+    def test_unrecognised_returns_raw(self):
+        assert parse_iso_duration("not-a-duration") == "not-a-duration"
+
+
+def _minimal_data(enterprise_extra=None):
+    """Return a minimal collect_data-style dict suitable for build_report."""
+    ent = {"Id": "ent-1", "Name": "Test Hotel"}
+    if enterprise_extra:
+        ent.update(enterprise_extra)
+    return {
+        "cfg": {"Enterprise": ent},
+        "enterprises": ["ent-1"],
+        "services": [],
+        "service_ids": [],
+        "rate_groups": [],
+        "rates": [],
+        "products": [],
+        "accounting_categories": [],
+        "resources": [],
+        "resource_categories": [],
+        "resource_category_assignments": [],
+        "restrictions": [],
+        "availability_blocks": [],
+        "rules_bundle": {},
+        "payments": [],
+        "payment_origin_counts_charged_90d": [],
+        "payment_origin_counts_failed_90d": [],
+        "cancellation_policies": [],
+        "rules": [],
+        "tax_environments": [],
+        "taxations": [],
+        "counters": [],
+        "cashiers": [],
+        "errors": {},
+        "api_calls": [],
+    }
+
+
+class TestBuildReportEHW:
+    def _find_check(self, report, key):
+        for _sec, items in report.sections:
+            for it in items:
+                if it.key == key:
+                    return it
+        return None
+
+    def test_ehw_shown_when_set(self):
+        data = _minimal_data({"EditableHistoryInterval": "P0M7DT0H0M0S"})
+        report = build_report(data, "https://api.mews-demo.com", "Test")
+        item = self._find_check(report, "Editable history window (EHW)")
+        assert item is not None
+        assert item.status == "PASS"
+        assert "7 Days" in item.summary
+        assert item.details.get("EditableHistoryWindowTable") == [{"Editable History Window": "7 Days"}]
+
+    def test_ehw_warn_when_missing(self):
+        data = _minimal_data()
+        report = build_report(data, "https://api.mews-demo.com", "Test")
+        item = self._find_check(report, "Editable history window (EHW)")
+        assert item is not None
+        assert item.status == "WARN"
+        assert item.risk == "High"
+
+    def test_ehw_fallback_to_top_level_cfg(self):
+        """If EditableHistoryInterval is at the top-level cfg (not under Enterprise), it should still be picked up."""
+        data = _minimal_data()
+        data["cfg"]["EditableHistoryInterval"] = "P1M"
+        report = build_report(data, "https://api.mews-demo.com", "Test")
+        item = self._find_check(report, "Editable history window (EHW)")
+        assert item is not None
+        assert item.status == "PASS"
+        assert "1 Month" in item.summary
