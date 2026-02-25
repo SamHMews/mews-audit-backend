@@ -48,6 +48,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 from svglib.svglib import svg2rlg
 from reportlab.graphics import renderPDF
+from reportlab.graphics.shapes import Drawing, Rect, Path, String as GString
 
 
 # =========================
@@ -1541,6 +1542,241 @@ def fetch_logo():
         return None
 
 
+def build_payment_sankey_drawing(
+    po_charged: List[Dict[str, Any]],
+    po_failed: List[Dict[str, Any]],
+    drawing_w_pt: float,
+) -> Optional[Drawing]:
+    """Return a reportlab Drawing with a Sankey diagram: Payment Origins → Charged / Failed+Cancelled.
+
+    Returns None when there is no data to visualise.
+    drawing_w_pt: target width in reportlab points (typically TABLE_FULL_W).
+    """
+    # ── Aggregate counts ──────────────────────────────────────────────────────
+    charged_map: Dict[str, int] = {}
+    for r in po_charged:
+        orig = str(r.get("PaymentOrigin") or "None")
+        charged_map[orig] = charged_map.get(orig, 0) + int(r.get("Count") or 0)
+
+    failed_map: Dict[str, int] = {}
+    for r in po_failed:
+        orig = str(r.get("PaymentOrigin") or "None")
+        failed_map[orig] = failed_map.get(orig, 0) + int(r.get("Count") or 0)
+
+    all_origins = sorted(
+        set(list(charged_map.keys()) + list(failed_map.keys())),
+        key=lambda x: -(charged_map.get(x, 0) + failed_map.get(x, 0)),
+    )
+    if not all_origins:
+        return None
+
+    total_charged = sum(charged_map.values())
+    total_failed = sum(failed_map.values())
+    grand_total = total_charged + total_failed
+    if grand_total == 0:
+        return None
+
+    # Limit visible origins so the diagram stays a reasonable height
+    MAX_VISIBLE = 12
+    extra_count = max(0, len(all_origins) - MAX_VISIBLE)
+    all_origins = all_origins[:MAX_VISIBLE]
+    n = len(all_origins)
+
+    # ── Layout constants in "SVG" top-down pixel space ────────────────────────
+    SVG_W        = 700.0   # reference canvas width (px)
+    NODE_W       = 14.0    # width of node rectangles (px)
+    ORIGIN_X     = 155.0   # left edge of origin nodes
+    OUTCOME_X    = 530.0   # left edge of outcome nodes
+    NODE_GAP     = 8.0     # vertical gap between consecutive origin nodes
+    OUTCOME_GAP  = 24.0    # vertical gap between Charged and Failed outcome nodes
+    TOP_MARGIN   = 10.0
+    BOTTOM_MARGIN= 14.0
+    FONT_SZ      = 10.0    # font size in SVG-px (→ ~7.5 pt in the PDF)
+    MIN_NODE_H   = 16.0    # minimum node height (px)
+
+    # Scale: px_per_unit maps a payment count to SVG pixels
+    target_col_h = max(100.0, min(300.0, float(n) * 32.0))
+    available_h  = max(1.0, target_col_h - NODE_GAP * max(0, n - 1))
+    px_per_unit  = available_h / grand_total
+
+    # Node heights (px) — MIN_NODE_H is applied per-node (floor), not via px_per_unit,
+    # so large origins are not blown up to accommodate tiny ones.
+    origin_heights = [
+        max(MIN_NODE_H, (charged_map.get(o, 0) + failed_map.get(o, 0)) * px_per_unit)
+        for o in all_origins
+    ]
+    charged_node_h = max(MIN_NODE_H, total_charged * px_per_unit) if total_charged else 0.0
+    failed_node_h  = max(MIN_NODE_H, total_failed  * px_per_unit) if total_failed  else 0.0
+
+    total_origin_col_h  = sum(origin_heights) + NODE_GAP * max(0, n - 1)
+    total_outcome_col_h = (
+        charged_node_h
+        + (OUTCOME_GAP if total_charged and total_failed else 0.0)
+        + failed_node_h
+    )
+    max_col_h   = max(total_origin_col_h, total_outcome_col_h)
+    note_extra  = 14.0 if extra_count else 0.0
+    SVG_H       = TOP_MARGIN + max_col_h + BOTTOM_MARGIN + note_extra
+
+    # Y positions (top-down), both columns vertically centred in max_col_h
+    origin_start_y  = TOP_MARGIN + (max_col_h - total_origin_col_h)  / 2.0
+    outcome_start_y = TOP_MARGIN + (max_col_h - total_outcome_col_h) / 2.0
+
+    origin_ys: List[float] = []
+    y = origin_start_y
+    for h in origin_heights:
+        origin_ys.append(y)
+        y += h + NODE_GAP
+
+    charged_top_y = outcome_start_y
+    failed_top_y  = (
+        outcome_start_y
+        + charged_node_h
+        + (OUTCOME_GAP if total_charged and total_failed else 0.0)
+    )
+
+    # ── Scale from SVG-px to reportlab points ─────────────────────────────────
+    pt_scale     = drawing_w_pt / SVG_W
+    drawing_h_pt = SVG_H * pt_scale
+
+    def pt(px: float) -> float:
+        return px * pt_scale
+
+    def rl_y(svg_top: float, svg_h: float = 0.0) -> float:
+        """Top-down SVG y → bottom-up reportlab y (bottom-left of a rect or text baseline)."""
+        return drawing_h_pt - (svg_top + svg_h) * pt_scale
+
+    # ── Colours ───────────────────────────────────────────────────────────────
+    C_ORIGIN_FILL   = colors.HexColor('#c7d2fe')  # indigo-200
+    C_ORIGIN_STROKE = colors.HexColor('#6366f1')  # indigo-500
+    C_CHARGED_FILL  = colors.HexColor('#86efac')  # green-300
+    C_CHARGED_STK   = colors.HexColor('#16a34a')  # green-600
+    C_FAILED_FILL   = colors.HexColor('#fca5a5')  # red-300
+    C_FAILED_STK    = colors.HexColor('#dc2626')  # red-600
+    C_FLOW_CHARGED  = colors.HexColor('#a7f3d0')  # emerald-200 (opaque)
+    C_FLOW_FAILED   = colors.HexColor('#fed7aa')  # orange-200  (opaque)
+    C_TEXT          = colors.HexColor('#374151')  # gray-700
+    C_CHARGED_TEXT  = colors.HexColor('#15803d')  # green-700
+    C_FAILED_TEXT   = colors.HexColor('#b91c1c')  # red-700
+    C_NOTE          = colors.HexColor('#6b7280')  # gray-500
+
+    d = Drawing(drawing_w_pt, drawing_h_pt)
+
+    # Background
+    d.add(Rect(0, 0, drawing_w_pt, drawing_h_pt,
+               fillColor=colors.HexColor('#f9fafb'),
+               strokeColor=colors.HexColor('#e5e7eb'),
+               strokeWidth=0.5))
+
+    # Control-point x for bezier curves (horizontal midpoint between node edges)
+    cpx = pt((ORIGIN_X + NODE_W + OUTCOME_X) / 2.0)
+
+    # ── Draw flows (added first so nodes render on top) ───────────────────────
+    charged_offset = 0.0
+    failed_offset  = 0.0
+
+    for i, orig in enumerate(all_origins):
+        c   = charged_map.get(orig, 0)
+        f   = failed_map.get(orig, 0)
+        tot = c + f
+        if tot == 0:
+            continue
+
+        node_h = origin_heights[i]
+        c_frac = c / tot if c else 0.0
+
+        # --- Charged flow ---
+        if c and total_charged:
+            flow_h_out = max(2.0, c * px_per_unit)
+            ox_top = origin_ys[i]
+            ox_bot = origin_ys[i] + node_h * c_frac
+            oc_top = charged_top_y + charged_offset
+            oc_bot = oc_top + flow_h_out
+            charged_offset += flow_h_out
+
+            x0, x1 = pt(ORIGIN_X + NODE_W), pt(OUTCOME_X)
+            p = Path(fillColor=C_FLOW_CHARGED, strokeColor=None, strokeWidth=0)
+            p.moveTo(x0, rl_y(ox_top))
+            p.curveTo(cpx, rl_y(ox_top), cpx, rl_y(oc_top), x1, rl_y(oc_top))
+            p.lineTo(x1, rl_y(oc_bot))
+            p.curveTo(cpx, rl_y(oc_bot), cpx, rl_y(ox_bot), x0, rl_y(ox_bot))
+            p.closePath()
+            d.add(p)
+
+        # --- Failed flow ---
+        if f and total_failed:
+            flow_h_out = max(2.0, f * px_per_unit)
+            ox_top = origin_ys[i] + node_h * c_frac
+            ox_bot = origin_ys[i] + node_h          # c_frac + f_frac = 1
+            of_top = failed_top_y + failed_offset
+            of_bot = of_top + flow_h_out
+            failed_offset += flow_h_out
+
+            x0, x1 = pt(ORIGIN_X + NODE_W), pt(OUTCOME_X)
+            p = Path(fillColor=C_FLOW_FAILED, strokeColor=None, strokeWidth=0)
+            p.moveTo(x0, rl_y(ox_top))
+            p.curveTo(cpx, rl_y(ox_top), cpx, rl_y(of_top), x1, rl_y(of_top))
+            p.lineTo(x1, rl_y(of_bot))
+            p.curveTo(cpx, rl_y(of_bot), cpx, rl_y(ox_bot), x0, rl_y(ox_bot))
+            p.closePath()
+            d.add(p)
+
+    # ── Origin nodes ──────────────────────────────────────────────────────────
+    for i, orig in enumerate(all_origins):
+        oy, oh = origin_ys[i], origin_heights[i]
+        d.add(Rect(pt(ORIGIN_X), rl_y(oy, oh), pt(NODE_W), pt(oh),
+                   fillColor=C_ORIGIN_FILL, strokeColor=C_ORIGIN_STROKE, strokeWidth=0.5))
+
+    # ── Outcome nodes ─────────────────────────────────────────────────────────
+    if total_charged:
+        d.add(Rect(pt(OUTCOME_X), rl_y(charged_top_y, charged_node_h),
+                   pt(NODE_W), pt(charged_node_h),
+                   fillColor=C_CHARGED_FILL, strokeColor=C_CHARGED_STK, strokeWidth=0.5))
+
+    if total_failed:
+        d.add(Rect(pt(OUTCOME_X), rl_y(failed_top_y, failed_node_h),
+                   pt(NODE_W), pt(failed_node_h),
+                   fillColor=C_FAILED_FILL, strokeColor=C_FAILED_STK, strokeWidth=0.5))
+
+    # ── Labels (drawn last, on top of everything) ─────────────────────────────
+    # Origin labels (right-aligned, beside each node)
+    for i, orig in enumerate(all_origins):
+        oy, oh = origin_ys[i], origin_heights[i]
+        cnt   = charged_map.get(orig, 0) + failed_map.get(orig, 0)
+        label = f"{orig}  ({cnt:,})"
+        if len(label) > 32:
+            label = label[:29] + "..."
+        baseline = rl_y(oy + oh / 2.0) - pt(FONT_SZ) * 0.35
+        d.add(GString(pt(ORIGIN_X - 5), baseline, label,
+                      fontName="Helvetica", fontSize=pt(FONT_SZ),
+                      fillColor=C_TEXT, textAnchor="end"))
+
+    # Outcome labels (left-aligned, beside each node)
+    if total_charged:
+        baseline = rl_y(charged_top_y + charged_node_h / 2.0) - pt(FONT_SZ) * 0.35
+        d.add(GString(pt(OUTCOME_X + NODE_W + 5), baseline,
+                      f"Charged  ({total_charged:,})",
+                      fontName="Helvetica-Bold", fontSize=pt(FONT_SZ),
+                      fillColor=C_CHARGED_TEXT, textAnchor="start"))
+
+    if total_failed:
+        baseline = rl_y(failed_top_y + failed_node_h / 2.0) - pt(FONT_SZ) * 0.35
+        d.add(GString(pt(OUTCOME_X + NODE_W + 5), baseline,
+                      f"Failed / Cancelled  ({total_failed:,})",
+                      fontName="Helvetica-Bold", fontSize=pt(FONT_SZ),
+                      fillColor=C_FAILED_TEXT, textAnchor="start"))
+
+    # "N more origins" note
+    if extra_count:
+        note_y = rl_y(SVG_H - BOTTOM_MARGIN / 2.0) - pt(FONT_SZ) * 0.35
+        d.add(GString(drawing_w_pt / 2.0, note_y,
+                      f"(Top {MAX_VISIBLE} of {MAX_VISIBLE + extra_count} origins shown, sorted by total volume)",
+                      fontName="Helvetica", fontSize=pt(7.5),
+                      fillColor=C_NOTE, textAnchor="middle"))
+
+    return d
+
+
 def build_pdf(report: AuditReport) -> bytes:
     from io import BytesIO
 
@@ -1906,6 +2142,14 @@ def build_pdf(report: AuditReport) -> bytes:
                 render_po_table("Payment Origin (last 90 days) — Charged", po_charged, err_po_charged)
                 render_po_table("Payment Origin (last 90 days) — Failed / Cancelled", po_failed, err_po_failed, fallback_origins=po_charged)
 
+                # ── Sankey flow diagram ────────────────────────────────────────
+                sankey_d = build_payment_sankey_drawing(po_charged, po_failed, TABLE_FULL_W)
+                if sankey_d is not None:
+                    block.append(Spacer(1, 14))
+                    block.append(Paragraph("<b>Detail: Payment Flow Diagram (last 90 days)</b>", styles["SmallX"]))
+                    block.append(Spacer(1, 6))
+                    block.append(sankey_d)
+                    block.append(Spacer(1, 8))
 
             if it.source:
                 block.append(Paragraph(f"<font color='#64748b'><b>Source:</b> {esc(it.source)}</font>", styles["TinyX"]))
